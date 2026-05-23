@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Data & databases
+data/
+
+# Generated output
+output/
+
+# LaTeX artifacts
+*.aux
+*.log
+*.out
+missfont.log
+texput.log
+
+# macOS
+.DS_Store
+
+# Secrets
+.env
+.env.local
+
+# Personal resume data (users supply their own)
+graph/seed_data.py
