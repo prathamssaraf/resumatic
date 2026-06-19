@@ -13,30 +13,66 @@ from .sources.ats import scrape_greenhouse, scrape_lever, scrape_ashby, scrape_w
 from .sources.aggregators import scrape_remoteok, scrape_remotive, scrape_jobicy
 from .sources.hn import scrape_hn_hiring, scrape_hn_search
 from .sources.simplify import scrape_simplify
-from .quality import filter_jobs
+from .quality import filter_jobs, llm_fit_check
 from .store import save_jobs, list_jobs, stats
 
 console = Console()
 
 # Default ATS watchlist — verified working slugs
 DEFAULT_ATS: list[tuple[str, str]] = [
-    # Greenhouse
+    # ── AI Labs & Frontier Models ─────────────────────────────────────────────
     ("greenhouse", "anthropic"),
+    ("greenhouse", "togetherai"),       # was lever/together (404)
+    ("greenhouse", "xai"),              # xAI / Grok
+    ("ashby", "openai"),
+    ("ashby", "perplexity"),
+    ("ashby", "cohere"),                # was greenhouse/cohere-3 (404)
+    ("ashby", "cognition"),             # Devin / Cognition AI
+    ("ashby", "runway"),                # Runway ML
+    ("lever", "anyscale"),
+    ("lever", "mistral"),               # was lever/mistral-ai (404)
+    ("workable", "huggingface"),        # was lever/huggingface (404)
+
+    # ── AI Infra & Tooling ────────────────────────────────────────────────────
     ("greenhouse", "scaleai"),
+    ("greenhouse", "databricks"),
+    ("ashby", "modal"),
+    ("ashby", "pinecone"),
+    ("ashby", "elevenlabs"),
+    ("ashby", "weaviate"),              # vector DB
+    ("ashby", "airbyte"),               # data integration
+
+    # ── Dev Tools & Platforms ─────────────────────────────────────────────────
     ("greenhouse", "vercel"),
     ("greenhouse", "figma"),
-    ("greenhouse", "cohere-3"),
-    ("greenhouse", "notion"),
-    # Lever
-    ("lever", "huggingface"),
-    ("lever", "anyscale"),
-    ("lever", "together"),
-    ("lever", "mistral-ai"),
-    # Ashby
+    ("greenhouse", "webflow"),
+    ("greenhouse", "temporal"),         # workflow orchestration
+    ("greenhouse", "amplitude"),
+    ("greenhouse", "mixpanel"),
+    ("greenhouse", "airtable"),
     ("ashby", "linear"),
     ("ashby", "cursor"),
     ("ashby", "replit"),
-    ("ashby", "modal"),
+    ("ashby", "notion"),                # was greenhouse/notion (404)
+    ("ashby", "snowflake"),
+    ("ashby", "ramp"),
+    ("ashby", "confluent"),
+
+    # ── High-Volume Engineering Employers ─────────────────────────────────────
+    ("greenhouse", "cloudflare"),
+    ("greenhouse", "stripe"),
+    ("greenhouse", "datadog"),
+    ("greenhouse", "mongodb"),
+    ("greenhouse", "elastic"),
+    ("greenhouse", "airbnb"),
+    ("greenhouse", "brex"),
+    ("greenhouse", "twilio"),
+    ("greenhouse", "chime"),
+    ("greenhouse", "mercury"),          # fintech
+    ("greenhouse", "marqeta"),
+    ("lever", "netflix"),
+    ("lever", "palantir"),
+    ("lever", "plaid"),
 ]
 
 
@@ -133,6 +169,49 @@ async def run_scan(
             deduped.append(j)
 
     filtered = filter_jobs(deduped, roles, remote_only, min_score)
+
+    # ── Drop jobs already in the DB BEFORE any LLM work ──────────────────────
+    # Without this, every scan re-fit-checks the same ~1000+ known jobs each
+    # cycle, flooding the LLM and starving the build loop.
+    from .store import existing_job_ids, job_id as _job_id
+    known = existing_job_ids()
+    fresh = [j for j in filtered if _job_id(j) not in known]
+
+    # ── LLM fit-check for fresh high-score jobs only ─────────────────────────
+    # Regex already killed the obvious ones; the LLM catches subtle mismatches
+    # (implicit seniority, role-type mismatches). Concurrency is bounded so it
+    # never saturates the thread pool the build loop also needs.
+    import config as _cfg
+    high = [j for j in fresh if j["score"] >= _cfg.MIN_SCORE_GOOD]
+    low  = [j for j in fresh if j["score"] <  _cfg.MIN_SCORE_GOOD]
+
+    to_save = low
+    if high:
+        loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(4)  # cap concurrent LLM calls
+
+        async def _check(job: dict):
+            async with sem:
+                return await loop.run_in_executor(
+                    None, llm_fit_check, job["title"], job.get("description", "")
+                )
+
+        checks = await asyncio.gather(*[_check(j) for j in high])
+        passed, llm_rejected = [], []
+        for job, (reject, reason) in zip(high, checks):
+            if reject:
+                llm_rejected.append((job["title"], job.get("company", ""), reason))
+            else:
+                passed.append(job)
+
+        if llm_rejected:
+            console.print(f"  [dim]LLM fit-check rejected {len(llm_rejected)} new high-score job(s):[/dim]")
+            for title, company, reason in llm_rejected:
+                console.print(f"    [dim]✗ {company} — {title[:45]} ({reason})[/dim]")
+
+        to_save = passed + low
+
+    filtered = to_save
     inserted, dupes = save_jobs(filtered)
 
     return {

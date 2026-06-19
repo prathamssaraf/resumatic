@@ -4,7 +4,6 @@ Simple — no vector DB, no embeddings.
 """
 from __future__ import annotations
 import sqlite3
-import json
 import hashlib
 from pathlib import Path
 
@@ -29,15 +28,40 @@ def _conn() -> sqlite3.Connection:
             score INTEGER,
             score_reason TEXT,
             status TEXT DEFAULT 'new',
-            created_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT (datetime('now')),
+            resume_path TEXT DEFAULT '',
+            cover_path TEXT DEFAULT ''
         )
     """)
+    # Migrate existing DBs that don't have the new columns
+    for col in ("resume_path", "cover_path"):
+        try:
+            c.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT DEFAULT ''")
+        except Exception:
+            pass
     c.commit()
     return c
 
 
-def _job_id(job: dict) -> str:
-    return hashlib.md5(job.get("url", job.get("title", "")).encode()).hexdigest()[:16]
+def job_id(job: dict) -> str:
+    # Deduplicate on (company + title) so the same role from different sources
+    # (e.g. Simplify + direct ATS) doesn't get saved twice.
+    company = (job.get("company") or "").strip().lower()
+    title   = (job.get("title")   or "").strip().lower()
+    key = f"{company}|{title}" if (company and title) else job.get("url", job.get("title", ""))
+    return hashlib.md5(key.encode()).hexdigest()[:16]
+
+
+# Backwards-compatible alias
+_job_id = job_id
+
+
+def existing_job_ids() -> set[str]:
+    """All job IDs already in the DB — used to skip re-processing known jobs."""
+    c = _conn()
+    rows = c.execute("SELECT id FROM jobs").fetchall()
+    c.close()
+    return {r[0] for r in rows}
 
 
 def save_jobs(jobs: list[dict]) -> tuple[int, int]:
@@ -94,20 +118,58 @@ def update_status(job_id: str, status: str) -> None:
     c.close()
 
 
-def prune_to_top_n(n: int) -> int:
-    """Keep only the top N jobs (newest + highest score). Returns number deleted."""
+def set_job_docs(job_id: str, resume_path: str, cover_path: str) -> None:
     c = _conn()
-    rows = c.execute(
-        "SELECT id FROM jobs ORDER BY posted_date DESC, score DESC, created_at DESC"
-    ).fetchall()
-    keep_ids = {r[0] for r in rows[:n]}
-    all_ids  = {r[0] for r in rows}
-    to_delete = all_ids - keep_ids
-    if to_delete:
-        c.execute(f"DELETE FROM jobs WHERE id IN ({','.join('?'*len(to_delete))})", list(to_delete))
-        c.commit()
+    c.execute(
+        "UPDATE jobs SET resume_path=?, cover_path=? WHERE id=?",
+        (resume_path, cover_path, job_id)
+    )
+    c.commit()
     c.close()
-    return len(to_delete)
+
+
+def expire_old_jobs(max_age_days: int = 10) -> int:
+    """Mark 'new' jobs older than max_age_days as 'skip' so they never get built."""
+    c = _conn()
+    c.execute(
+        "UPDATE jobs SET status='skip' WHERE status='new' AND posted_date != '' "
+        "AND posted_date < datetime('now', ?)",
+        (f"-{max_age_days} days",)
+    )
+    count = c.total_changes
+    c.commit()
+    c.close()
+    return count
+
+
+def claim_next_build_job(min_score: int, exclude_ids: set[str]) -> dict | None:
+    """
+    Atomically claim the highest-score 'new' job for building.
+    Only picks jobs posted within the last 10 days.
+    Marks it 'building' so concurrent calls never double-process.
+    Returns the job dict or None if queue is empty.
+    """
+    c = _conn()
+    placeholders = ",".join("?" * len(exclude_ids)) if exclude_ids else "NULL"
+    query = f"""
+        SELECT * FROM jobs
+        WHERE status='new' AND score >= ?
+        AND (posted_date = '' OR posted_date >= datetime('now', '-10 days'))
+        {"AND id NOT IN (" + placeholders + ")" if exclude_ids else ""}
+        ORDER BY score DESC, created_at ASC
+        LIMIT 1
+    """
+    params = [min_score] + list(exclude_ids)
+    row = c.execute(query, params).fetchone()
+    if not row:
+        c.close()
+        return None
+    job = dict(row)
+    c.execute("UPDATE jobs SET status='building' WHERE id=? AND status='new'", (job["id"],))
+    claimed = c.total_changes > 0
+    c.commit()
+    c.close()
+    return job if claimed else None
 
 
 def stats() -> dict:

@@ -62,15 +62,19 @@ def parse_date(value: str | int | float | None) -> str:
 
 
 def is_recent(date_str: str) -> bool:
+    # Empty date → keep it (HN and some aggregators legitimately don't supply
+    # a posted_date; rejecting all of them is too aggressive).
+    # Malformed date → reject (a scraper returning garbage shouldn't sneak
+    # stale postings through silently).
     if not date_str:
-        return True  # unknown age — keep it
+        return True
     try:
         dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return (datetime.now(tz=timezone.utc) - dt).days <= MAX_AGE_DAYS
     except Exception:
-        return True
+        return False
 
 
 def strip_html(text: str) -> str:
