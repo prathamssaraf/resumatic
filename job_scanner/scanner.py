@@ -13,7 +13,7 @@ from .sources.ats import scrape_greenhouse, scrape_lever, scrape_ashby, scrape_w
 from .sources.aggregators import scrape_remoteok, scrape_remotive, scrape_jobicy
 from .sources.hn import scrape_hn_hiring, scrape_hn_search
 from .sources.simplify import scrape_simplify
-from .quality import filter_jobs, llm_fit_check
+from .quality import evaluate_job, CRITERIA
 from .store import save_jobs, list_jobs, stats
 
 console = Console()
@@ -95,12 +95,11 @@ async def _run_ats(provider: str, slug: str) -> list[dict]:
 
 async def run_scan(
     roles: list[str],
-    remote_only: bool = True,
     ats_watchlist: list[tuple[str, str]] | None = None,
     include_aggregators: bool = True,
     include_hn: bool = True,
     include_simplify: bool = True,
-    min_score: int = 50,
+    max_concurrent: int = 3,
 ) -> dict:
     watchlist = ats_watchlist if ats_watchlist is not None else DEFAULT_ATS
 
@@ -159,7 +158,12 @@ async def run_scan(
                     all_raw.extend(r)
             progress.remove_task(task)
 
-    # Quality gate + dedup by URL
+    # ── Free gates (no LLM): dedup by URL, drop no-URL/stale, drop known ──────
+    # These are mechanical de-noising so Gemma only ever evaluates fresh, unseen
+    # postings — never the same ~1000+ jobs every cycle.
+    from .store import existing_job_ids, job_id as _job_id
+    from .sources.common import is_recent
+
     seen_urls: set[str] = set()
     deduped = []
     for j in all_raw:
@@ -168,59 +172,53 @@ async def run_scan(
             seen_urls.add(url)
             deduped.append(j)
 
-    filtered = filter_jobs(deduped, roles, remote_only, min_score)
-
-    # ── Drop jobs already in the DB BEFORE any LLM work ──────────────────────
-    # Without this, every scan re-fit-checks the same ~1000+ known jobs each
-    # cycle, flooding the LLM and starving the build loop.
-    from .store import existing_job_ids, job_id as _job_id
     known = existing_job_ids()
-    fresh = [j for j in filtered if _job_id(j) not in known]
+    candidates = [
+        j for j in deduped
+        if is_recent(j.get("posted_date", "")) and _job_id(j) not in known
+    ]
 
-    # ── LLM fit-check for fresh high-score jobs only ─────────────────────────
-    # Regex already killed the obvious ones; the LLM catches subtle mismatches
-    # (implicit seniority, role-type mismatches). Concurrency is bounded so it
-    # never saturates the thread pool the build loop also needs.
-    import config as _cfg
-    high = [j for j in fresh if j["score"] >= _cfg.MIN_SCORE_GOOD]
-    low  = [j for j in fresh if j["score"] <  _cfg.MIN_SCORE_GOOD]
+    # ── LLM screen: each job is checked against every criterion, one call per ─
+    # criterion, short-circuiting on the first failure. Jobs that pass all are
+    # Approved and scored. Bounded concurrency keeps the local model responsive.
+    loop = asyncio.get_running_loop()
+    sem = asyncio.Semaphore(max_concurrent)
 
-    to_save = low
-    if high:
-        loop = asyncio.get_running_loop()
-        sem = asyncio.Semaphore(4)  # cap concurrent LLM calls
+    async def _screen(job: dict):
+        async with sem:
+            return await loop.run_in_executor(None, evaluate_job, job)
 
-        async def _check(job: dict):
-            async with sem:
-                return await loop.run_in_executor(
-                    None, llm_fit_check, job["title"], job.get("description", "")
-                )
+    verdicts = await asyncio.gather(
+        *[_screen(j) for j in candidates], return_exceptions=True
+    )
 
-        checks = await asyncio.gather(*[_check(j) for j in high])
-        passed, llm_rejected = [], []
-        for job, (reject, reason) in zip(high, checks):
-            if reject:
-                llm_rejected.append((job["title"], job.get("company", ""), reason))
-            else:
-                passed.append(job)
+    approved, rejected, errored = [], [], 0
+    for job, verdict in zip(candidates, verdicts):
+        if isinstance(verdict, Exception):
+            # LLM error — don't persist; retry on the next cycle.
+            errored += 1
+            continue
+        job["score"]        = verdict["score"]
+        job["score_reason"] = verdict["reason"]
+        job["status"]       = "approved" if verdict["approved"] else "rejected"
+        (approved if verdict["approved"] else rejected).append(job)
 
-        if llm_rejected:
-            console.print(f"  [dim]LLM fit-check rejected {len(llm_rejected)} new high-score job(s):[/dim]")
-            for title, company, reason in llm_rejected:
-                console.print(f"    [dim]✗ {company} — {title[:45]} ({reason})[/dim]")
+    # Persist both approved and rejected (rejected so we never re-screen them).
+    inserted, dupes = save_jobs(approved + rejected)
 
-        to_save = passed + low
-
-    filtered = to_save
-    inserted, dupes = save_jobs(filtered)
+    if errored:
+        console.print(f"  [dim]{errored} job(s) errored during screening — will retry next cycle[/dim]")
 
     return {
         "raw": len(all_raw),
         "after_dedup": len(deduped),
-        "after_filter": len(filtered),
+        "candidates": len(candidates),
+        "approved": len(approved),
+        "rejected": len(rejected),
+        "errored": errored,
         "inserted": inserted,
         "dupes": dupes,
-        "jobs": filtered,
+        "jobs": approved,
     }
 
 
@@ -228,12 +226,13 @@ def print_results(result: dict) -> None:
     jobs = result["jobs"]
     console.print(f"\n[bold]Scan complete[/bold] — {result['raw']} raw → "
                   f"{result['after_dedup']} deduped → "
-                  f"[green]{result['after_filter']} passed quality gate[/green] → "
-                  f"[cyan]{result['inserted']} new saved[/cyan] "
-                  f"([dim]{result['dupes']} dupes[/dim])\n")
+                  f"[cyan]{result['candidates']} screened by LLM[/cyan] → "
+                  f"[green]{result['approved']} approved[/green], "
+                  f"[dim]{result['rejected']} rejected[/dim] "
+                  f"([dim]{result['inserted']} new saved[/dim])\n")
 
     if not jobs:
-        console.print("[yellow]No jobs passed the quality gate.[/yellow]")
+        console.print("[yellow]No jobs approved this scan.[/yellow]")
         return
 
     table = Table(box=box.SIMPLE_HEAD, show_lines=False)
@@ -275,7 +274,8 @@ def print_job_list(status: str | None = None) -> None:
     table.add_column("Location", max_width=14)
 
     for j in jobs:
-        status_style = {"new": "green", "applied": "blue", "skip": "dim"}.get(j["status"], "")
+        status_style = {"approved": "green", "applied": "blue",
+                        "rejected": "dim", "skip": "dim"}.get(j["status"], "")
         table.add_row(
             j["id"],
             str(j["score"]),

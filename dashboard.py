@@ -380,9 +380,9 @@ function pollOverview() {
     var cards = document.querySelectorAll('.sc .sn');
     if (cards.length >= 4) {
       cards[0].textContent = d.total;
-      cards[1].textContent = d.new_count;
+      cards[1].textContent = d.approved_count;
       cards[2].textContent = d.applied_count;
-      cards[3].textContent = d.skipped_count;
+      cards[3].textContent = d.rejected_count;
     }
   }).catch(function(){});
 }
@@ -418,7 +418,8 @@ function markApplied(jobId, btn) {
 
 # ── Render helpers ────────────────────────────────────────────────────────────
 def _badge(status: str) -> str:
-    m = {"new":("bnw","New"),"applied":("bap","Applied"),"skip":("bsk","Skipped"),"error":("ber","Error")}
+    m = {"approved":("bap","Approved"),"applied":("bnw","Applied"),
+         "rejected":("bsk","Rejected"),"skip":("bsk","Skipped"),"error":("ber","Error")}
     cls, label = m.get(status, ("bsk", status.title()))
     return f'<span class="bdg {cls}">{label}</span>'
 
@@ -476,19 +477,19 @@ def _jobs_grid(jobs: list[dict], mark_applied: bool = True) -> str:
 def _render_page() -> str:
     s=stats(); by_status=s.get("by_status",{}); total=s.get("total",0)
     all_jobs=list_jobs(limit=200)
-    new_jobs=[j for j in all_jobs if j["status"]=="new"]
+    approved_jobs=[j for j in all_jobs if j["status"]=="approved"]
     applied =[j for j in all_jobs if j["status"]=="applied"]
-    skipped =[j for j in all_jobs if j["status"] in ("skip","error")]
-    nc=by_status.get("new",0); ac=by_status.get("applied",0)
-    sc_n=by_status.get("skip",0)+by_status.get("error",0)
+    rejected =[j for j in all_jobs if j["status"] in ("rejected","skip","error")]
+    apc=by_status.get("approved",0); ac=by_status.get("applied",0)
+    rc=by_status.get("rejected",0)+by_status.get("skip",0)+by_status.get("error",0)
     plats=s.get("by_platform",{})
     plat_pills=" ".join(f'<span class="plat">{_esc(p)}<b>{c}</b></span>' for p,c in sorted(plats.items(),key=lambda x:-x[1])) or '<span class="plat">none yet</span>'
 
     stat_cards=(
-        f'<div class="sc ct"><div class="sn">{total}</div><div class="sl">Total</div></div>'
-        f'<div class="sc cn"><div class="sn">{nc}</div><div class="sl">New</div></div>'
-        f'<div class="sc ce"><div class="sn">{ac}</div><div class="sl">Applied</div></div>'
-        f'<div class="sc cs"><div class="sn">{sc_n}</div><div class="sl">Skipped</div></div>'
+        f'<div class="sc ct"><div class="sn">{total}</div><div class="sl">Total Screened</div></div>'
+        f'<div class="sc ce"><div class="sn">{apc}</div><div class="sl">Approved</div></div>'
+        f'<div class="sc cn"><div class="sn">{ac}</div><div class="sl">Applied</div></div>'
+        f'<div class="sc cs"><div class="sn">{rc}</div><div class="sl">Rejected</div></div>'
     )
 
     def sec(title, jobs, cls):
@@ -502,11 +503,13 @@ def _render_page() -> str:
 
     jobs_tab=(
         f'<div class="plats"><span class="plats-l">Sources</span>{plat_pills}</div>'
-        + sec("New &mdash; Suitable Matches", new_jobs, "sec-nw")
-        + sec("Applied", applied, "sec-em")
-        + sec("Skipped / Error", skipped, "sec-sk")
+        + sec("Approved &mdash; Passed All Criteria", approved_jobs, "sec-em")
+        + sec("Applied", applied, "sec-nw")
+        + sec("Rejected", rejected, "sec-sk")
     )
 
+    from job_scanner.quality import CRITERIA
+    _n_criteria = len(CRITERIA)
     scraper_on = _scraper_running()
     scan_mins  = config.SCAN_INTERVAL_SECONDS // 60
 
@@ -545,8 +548,8 @@ def _render_page() -> str:
         f'        <h1 class="hdr-t">Job Hunt</h1>\n'
         f'        <div class="hdr-meta">\n'
         f'          <span class="hdr-mi">Refresh 20s</span>\n'
-        f'          <span class="hdr-mi">Save &ge; {config.MIN_SCORE_SAVE}</span>\n'
-        f'          <span class="hdr-mi">Strong &ge; {config.MIN_SCORE_GOOD}</span>\n'
+        f'          <span class="hdr-mi">{_n_criteria} LLM criteria</span>\n'
+        f'          <span class="hdr-mi">Strong fit &ge; {config.MIN_SCORE_GOOD}</span>\n'
         f'        </div>\n'
         f'      </div>\n'
         f'      <div class="hdr-r">\n'
@@ -605,9 +608,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({
                 "scraper": _scraper_running(),
                 "total": job_stats.get("total", 0),
-                "new_count": by_status.get("new", 0),
+                "approved_count": by_status.get("approved", 0),
                 "applied_count": by_status.get("applied", 0),
-                "skipped_count": by_status.get("skip", 0) + by_status.get("error", 0),
+                "rejected_count": by_status.get("rejected", 0) + by_status.get("skip", 0) + by_status.get("error", 0),
             }); return
 
         self.send_response(404); self.end_headers()

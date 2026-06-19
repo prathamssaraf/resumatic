@@ -19,8 +19,6 @@ def cmd_scan(args: argparse.Namespace) -> None:
     roles = args.roles or ["Software Engineer", "ML Engineer"]
     result = asyncio.run(run_scan(
         roles=roles,
-        remote_only=not args.no_remote,
-        min_score=args.min_score,
         include_aggregators=not args.no_aggregators,
         include_hn=not args.no_hn,
         include_simplify=not args.no_simplify,
@@ -51,11 +49,9 @@ def main() -> None:
     scan_p = sub.add_parser("scan", help="Scan job boards and save new leads")
     scan_p.add_argument("--roles", nargs="+", default=None,
                         help='Role keywords, e.g. --roles "ML Engineer" "Backend SWE"')
-    scan_p.add_argument("--no-remote", action="store_true", help="Include non-remote jobs")
     scan_p.add_argument("--no-aggregators", action="store_true", help="Skip RemoteOK/Remotive/Jobicy")
     scan_p.add_argument("--no-hn", action="store_true", help="Skip Hacker News")
     scan_p.add_argument("--no-simplify", action="store_true", help="Skip SimplifyJobs feed")
-    scan_p.add_argument("--min-score", type=int, default=50, help="Minimum quality score (default 50)")
     scan_p.set_defaults(func=cmd_scan)
 
     # list

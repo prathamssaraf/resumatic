@@ -73,13 +73,13 @@ def save_jobs(jobs: list[dict]) -> tuple[int, int]:
         try:
             c.execute("""
                 INSERT INTO jobs (id, title, company, url, platform, description,
-                                  location, salary, posted_date, score, score_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  location, salary, posted_date, score, score_reason, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 jid, j.get("title", ""), j.get("company", ""), j.get("url", ""),
                 j.get("platform", ""), j.get("description", ""), j.get("location", ""),
                 j.get("salary", ""), j.get("posted_date", ""),
-                j.get("score", 0), j.get("score_reason", ""),
+                j.get("score", 0), j.get("score_reason", ""), j.get("status", "new"),
             ))
             inserted += 1
         except sqlite3.IntegrityError:
@@ -118,21 +118,11 @@ def update_status(job_id: str, status: str) -> None:
     c.close()
 
 
-def set_job_docs(job_id: str, resume_path: str, cover_path: str) -> None:
-    c = _conn()
-    c.execute(
-        "UPDATE jobs SET resume_path=?, cover_path=? WHERE id=?",
-        (resume_path, cover_path, job_id)
-    )
-    c.commit()
-    c.close()
-
-
 def expire_old_jobs(max_age_days: int = 10) -> int:
-    """Mark 'new' jobs older than max_age_days as 'skip' so they never get built."""
+    """Mark approved jobs older than max_age_days as 'skip' so the list stays fresh."""
     c = _conn()
     c.execute(
-        "UPDATE jobs SET status='skip' WHERE status='new' AND posted_date != '' "
+        "UPDATE jobs SET status='skip' WHERE status='approved' AND posted_date != '' "
         "AND posted_date < datetime('now', ?)",
         (f"-{max_age_days} days",)
     )
@@ -140,36 +130,6 @@ def expire_old_jobs(max_age_days: int = 10) -> int:
     c.commit()
     c.close()
     return count
-
-
-def claim_next_build_job(min_score: int, exclude_ids: set[str]) -> dict | None:
-    """
-    Atomically claim the highest-score 'new' job for building.
-    Only picks jobs posted within the last 10 days.
-    Marks it 'building' so concurrent calls never double-process.
-    Returns the job dict or None if queue is empty.
-    """
-    c = _conn()
-    placeholders = ",".join("?" * len(exclude_ids)) if exclude_ids else "NULL"
-    query = f"""
-        SELECT * FROM jobs
-        WHERE status='new' AND score >= ?
-        AND (posted_date = '' OR posted_date >= datetime('now', '-10 days'))
-        {"AND id NOT IN (" + placeholders + ")" if exclude_ids else ""}
-        ORDER BY score DESC, created_at ASC
-        LIMIT 1
-    """
-    params = [min_score] + list(exclude_ids)
-    row = c.execute(query, params).fetchone()
-    if not row:
-        c.close()
-        return None
-    job = dict(row)
-    c.execute("UPDATE jobs SET status='building' WHERE id=? AND status='new'", (job["id"],))
-    claimed = c.total_changes > 0
-    c.commit()
-    c.close()
-    return job if claimed else None
 
 
 def stats() -> dict:

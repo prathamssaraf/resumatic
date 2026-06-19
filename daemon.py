@@ -1,9 +1,10 @@
 """
 Daemon — scan-only loop.
 
-Scrapes every SCAN_INTERVAL_SECONDS, scores each posting, and saves qualifying
-jobs (score >= MIN_SCORE_SAVE) to the DB. Strong matches (score >= MIN_SCORE_GOOD)
-are highlighted in the log. Review saved jobs in the dashboard.
+Scrapes every SCAN_INTERVAL_SECONDS and screens each fresh posting against the
+LLM criteria in job_scanner/quality.py (one Gemma call per criterion). Jobs that
+pass every criterion are saved as 'approved' with a 0-100 fit score; the rest are
+saved as 'rejected'. Review approved jobs in the dashboard.
 
 Run: uv run python main.py daemon
 """
@@ -35,16 +36,15 @@ async def _scan_loop(scan_interval: int) -> None:
                 console.print(f"  [dim]Expired {expired} job(s) older than 10 days → skip[/dim]")
             result = await run_scan(
                 roles=config.DEFAULT_ROLES,
-                remote_only=config.REMOTE_ONLY,
-                min_score=config.MIN_SCORE_SAVE,
+                max_concurrent=config.MAX_SCREEN_CONCURRENCY,
             )
-            new_count = result["inserted"]
             console.print(
-                f"  Scan: {result['raw']} raw → {result['after_filter']} passed → "
-                f"[cyan]{new_count} new saved[/cyan]"
+                f"  Scan: {result['raw']} raw → {result['candidates']} screened → "
+                f"[green]{result['approved']} approved[/green], "
+                f"[dim]{result['rejected']} rejected[/dim]"
             )
-            if new_count == 0:
-                console.print("  No new jobs this scan.")
+            if result["approved"] == 0:
+                console.print("  No new approved jobs this scan.")
         except Exception as e:
             console.print(f"[red]Scan {cycle} error:[/red] {e}")
 
@@ -65,10 +65,11 @@ async def run_daemon() -> None:
     except Exception:
         pass
 
+    from job_scanner.quality import CRITERIA
     console.print("[bold green]Jobs scanner daemon started[/bold green]")
     console.print(f"  Scan every   : {config.SCAN_INTERVAL_SECONDS // 60} minutes")
-    console.print(f"  Save score   : >= {config.MIN_SCORE_SAVE}")
-    console.print(f"  Strong match : >= {config.MIN_SCORE_GOOD}")
+    console.print(f"  Criteria     : {len(CRITERIA)} LLM checks per job (approve if all pass)")
+    console.print(f"  Strong match : fit score >= {config.MIN_SCORE_GOOD}")
     console.print(f"  Roles        : {', '.join(config.DEFAULT_ROLES)}\n")
 
     s = stats()

@@ -21,10 +21,11 @@ if _env.exists():
 SCAN_INTERVAL_SECONDS = 20 * 60  # scan every 20 minutes
 
 # ── Scanner defaults ───────────────────────────────────────────────────────────
+# Roles query the aggregator / HN feeds (the ATS watchlist is fixed). Approval is
+# decided by the LLM criteria in job_scanner/quality.py, not by a numeric score.
 DEFAULT_ROLES   = ["Software Engineer", "ML Engineer", "Backend Engineer"]
-REMOTE_ONLY     = True
-MIN_SCORE_SAVE  = 45             # jobs below this are not saved at all
-MIN_SCORE_GOOD  = 70             # jobs at/above this are flagged as strong matches
+MIN_SCORE_GOOD  = 70             # approved jobs at/above this fit score are flagged "strong"
+MAX_SCREEN_CONCURRENCY = 3       # concurrent jobs sent to the local LLM during a scan
 
 # ── LLM (LM Studio) ────────────────────────────────────────────────────────────
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://192.168.86.22:1234/v1")
