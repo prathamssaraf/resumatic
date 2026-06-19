@@ -222,13 +222,13 @@ body{background:var(--bg);color:var(--tx);font-family:var(--fm);font-size:13px;
 /* data grid */
 .dg{background:var(--sf);border:1px solid var(--bd);border-radius:8px;overflow:hidden;overflow-x:auto}
 .dgh{display:grid;
-  grid-template-columns:44px minmax(180px,1fr) 92px 76px minmax(100px,.65fr) 92px 80px;
+  grid-template-columns:44px minmax(180px,1fr) 92px 76px minmax(100px,.6fr) 88px 150px;
   padding:9px 16px;border-bottom:1px solid var(--bd);background:var(--sf2)}
 .dgh span{font-size:10px;letter-spacing:.12em;text-transform:uppercase;
   color:var(--t3);font-weight:700;padding:0 6px}
 .dgh span:first-child{padding-left:0}
 .dgr{display:grid;
-  grid-template-columns:44px minmax(180px,1fr) 92px 76px minmax(100px,.65fr) 92px 80px;
+  grid-template-columns:44px minmax(180px,1fr) 92px 76px minmax(100px,.6fr) 88px 150px;
   padding:10px 16px;border-bottom:1px solid var(--bd);
   align-items:center;transition:background .12s;animation:row-in .25s ease both}
 .dgr:last-child{border-bottom:none}
