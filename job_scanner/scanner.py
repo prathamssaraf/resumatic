@@ -180,31 +180,58 @@ async def run_scan(
 
     # ── LLM screen: each job is checked against every criterion, one call per ─
     # criterion, short-circuiting on the first failure. Jobs that pass all are
-    # Approved and scored. Bounded concurrency keeps the local model responsive.
+    # Approved and scored. Each verdict is SAVED IMMEDIATELY (approved or
+    # rejected) so the dashboard fills live and a restart never re-screens work
+    # already done. Bounded concurrency keeps the local model responsive.
     loop = asyncio.get_running_loop()
     sem = asyncio.Semaphore(max_concurrent)
+    save_lock = asyncio.Lock()
+    n_total = len(candidates)
+    counts = {"approved": 0, "rejected": 0, "errored": 0, "inserted": 0, "dupes": 0, "done": 0}
+    approved_jobs: list[dict] = []
 
-    async def _screen(job: dict):
+    if n_total:
+        console.print(f"  [cyan]Screening {n_total} fresh job(s) through {len(CRITERIA)} criteria…[/cyan]")
+
+    async def _screen(job: dict) -> None:
         async with sem:
-            return await loop.run_in_executor(None, evaluate_job, job)
+            try:
+                verdict = await loop.run_in_executor(None, evaluate_job, job)
+            except Exception as e:
+                counts["errored"] += 1
+                counts["done"] += 1
+                console.print(f"  [dim]✗ screen error ({counts['done']}/{n_total}): {str(e)[:60]}[/dim]")
+                return
 
-    verdicts = await asyncio.gather(
-        *[_screen(j) for j in candidates], return_exceptions=True
-    )
-
-    approved, rejected, errored = [], [], 0
-    for job, verdict in zip(candidates, verdicts):
-        if isinstance(verdict, Exception):
-            # LLM error — don't persist; retry on the next cycle.
-            errored += 1
-            continue
         job["score"]        = verdict["score"]
         job["score_reason"] = verdict["reason"]
         job["status"]       = "approved" if verdict["approved"] else "rejected"
-        (approved if verdict["approved"] else rejected).append(job)
 
-    # Persist both approved and rejected (rejected so we never re-screen them).
-    inserted, dupes = save_jobs(approved + rejected)
+        async with save_lock:
+            ins, dup = await loop.run_in_executor(None, save_jobs, [job])
+        counts["inserted"] += ins
+        counts["dupes"]    += dup
+        counts["done"]     += 1
+        if verdict["approved"]:
+            counts["approved"] += 1
+            approved_jobs.append(job)
+            console.print(
+                f"  [green]✓ APPROVED[/green] [dim]({counts['done']}/{n_total})[/dim] "
+                f"{job.get('company','')[:18]} — {job['title'][:42]} "
+                f"[dim](fit {verdict['score']})[/dim]"
+            )
+        else:
+            counts["rejected"] += 1
+            console.print(
+                f"  [dim]· rejected ({counts['done']}/{n_total}) "
+                f"{job.get('company','')[:18]} — {job['title'][:42]} "
+                f"[{verdict.get('failed','')}][/dim]"
+            )
+
+    await asyncio.gather(*[_screen(j) for j in candidates])
+
+    approved_n, rejected_n = counts["approved"], counts["rejected"]
+    inserted, dupes, errored = counts["inserted"], counts["dupes"], counts["errored"]
 
     if errored:
         console.print(f"  [dim]{errored} job(s) errored during screening — will retry next cycle[/dim]")
@@ -213,12 +240,12 @@ async def run_scan(
         "raw": len(all_raw),
         "after_dedup": len(deduped),
         "candidates": len(candidates),
-        "approved": len(approved),
-        "rejected": len(rejected),
+        "approved": approved_n,
+        "rejected": rejected_n,
         "errored": errored,
         "inserted": inserted,
         "dupes": dupes,
-        "jobs": approved,
+        "jobs": approved_jobs,
     }
 
 
