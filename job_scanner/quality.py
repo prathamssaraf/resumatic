@@ -60,30 +60,36 @@ def _excerpt(desc: str) -> str:
     return clean[:_MAX_DESC]
 
 
-def check_criterion(question: str, title: str, desc: str) -> tuple[bool, str]:
+def _job_block(title: str, location: str, desc: str) -> str:
+    loc = location.strip() if location else "(not specified)"
+    return (
+        f"Job Title: {title}\n"
+        f"Job Location (from the source listing): {loc}\n\n"
+        f"Job Posting:\n{_excerpt(desc)}"
+    )
+
+
+def check_criterion(question: str, title: str, desc: str, location: str = "") -> tuple[bool, str]:
     """
     Ask Gemma a single yes/no criterion about one job. Returns (passed, reason).
     Raises on LLM failure — the caller skips the job this cycle and retries.
     """
     system = (
         "You screen job postings for a specific candidate.\n" + CANDIDATE +
-        "\n\nYou are given ONE yes/no criterion. Judge it using only the job "
-        "posting below. 'pass' = true means the job SATISFIES the criterion. "
-        "If the posting does not give enough information, lean towards true. "
+        "\n\nYou are given ONE yes/no criterion. Judge it using the job posting "
+        "and its listed location. 'pass' = true means the job SATISFIES the "
+        "criterion. If the posting truly gives no relevant information, lean "
+        "towards true. "
         'Respond with JSON only: {"pass": true|false, "reason": "<short phrase>"}.'
     )
-    user = (
-        f"Criterion: {question}\n\n"
-        f"Job Title: {title}\n\n"
-        f"Job Posting:\n{_excerpt(desc)}"
-    )
+    user = f"Criterion: {question}\n\n" + _job_block(title, location, desc)
     result = call_json(system, user, max_tokens=512, temperature=0.1)
     if not isinstance(result, dict):
         raise RuntimeError(f"check_criterion: expected dict, got {type(result).__name__}")
     return bool(result.get("pass", False)), str(result.get("reason", "")).strip()
 
 
-def score_fit(title: str, desc: str) -> tuple[int, str]:
+def score_fit(title: str, desc: str, location: str = "") -> tuple[int, str]:
     """Ask Gemma to rate overall fit 0-100 for an already-approved job."""
     system = (
         "You rate how well a job fits a specific candidate.\n" + CANDIDATE +
@@ -91,7 +97,7 @@ def score_fit(title: str, desc: str) -> tuple[int, str]:
         "skills and level) and a one-line reason. "
         'Respond with JSON only: {"score": <int 0-100>, "reason": "<short phrase>"}.'
     )
-    user = f"Job Title: {title}\n\nJob Posting:\n{_excerpt(desc)}"
+    user = _job_block(title, location, desc)
     result = call_json(system, user, max_tokens=512, temperature=0.2)
     if not isinstance(result, dict):
         raise RuntimeError(f"score_fit: expected dict, got {type(result).__name__}")
@@ -109,10 +115,11 @@ def evaluate_job(job: dict) -> dict:
         {"approved": bool, "score": int, "reason": str, "failed": str | None}
     Raises on LLM failure (propagated so the scanner can skip + retry the job).
     """
-    title = job.get("title", "")
-    desc  = job.get("description", "")
+    title    = job.get("title", "")
+    desc     = job.get("description", "")
+    location = job.get("location", "")
     for key, question in CRITERIA:
-        passed, reason = check_criterion(question, title, desc)
+        passed, reason = check_criterion(question, title, desc, location)
         if not passed:
             return {
                 "approved": False,
@@ -120,5 +127,5 @@ def evaluate_job(job: dict) -> dict:
                 "reason": f"{key}: {reason}" if reason else f"failed {key}",
                 "failed": key,
             }
-    score, reason = score_fit(title, desc)
+    score, reason = score_fit(title, desc, location)
     return {"approved": True, "score": score, "reason": reason, "failed": None}
