@@ -375,7 +375,8 @@ function pollOverview() {
     // tab counts + stat cards
     var tabs = document.querySelectorAll('.tab');
     tabs.forEach(function(t) {
-      if (t.dataset.tab === 'jobs') t.textContent = 'Jobs (' + d.total + ')';
+      if (t.dataset.tab === 'approved') t.textContent = 'Approved (' + d.approved_count + ')';
+      if (t.dataset.tab === 'rejected') t.textContent = 'Rejected (' + d.rejected_count + ')';
     });
     var cards = document.querySelectorAll('.sc .sn');
     if (cards.length >= 4) {
@@ -476,10 +477,10 @@ def _jobs_grid(jobs: list[dict], mark_applied: bool = True) -> str:
 
 def _render_page() -> str:
     s=stats(); by_status=s.get("by_status",{}); total=s.get("total",0)
-    all_jobs=list_jobs(limit=200)
-    approved_jobs=[j for j in all_jobs if j["status"]=="approved"]
-    applied =[j for j in all_jobs if j["status"]=="applied"]
-    rejected =[j for j in all_jobs if j["status"] in ("rejected","skip","error")]
+    # Fetch each status list separately so a view shows a full list, not a slice.
+    approved_jobs=list_jobs(status="approved", limit=500)
+    applied      =list_jobs(status="applied",  limit=500)
+    rejected     =list_jobs(status="rejected", limit=500)
     apc=by_status.get("approved",0); ac=by_status.get("applied",0)
     rc=by_status.get("rejected",0)+by_status.get("skip",0)+by_status.get("error",0)
     plats=s.get("by_platform",{})
@@ -501,11 +502,18 @@ def _render_page() -> str:
             f'</div><div class="secbd">{_jobs_grid(jobs)}</div></div>'
         )
 
-    jobs_tab=(
+    # ── Approved view: approved jobs + the ones you've already applied to ──────
+    approved_tab=(
         f'<div class="plats"><span class="plats-l">Sources</span>{plat_pills}</div>'
-        + sec("Approved &mdash; Passed All Criteria", approved_jobs, "sec-em")
+        + (sec("Approved &mdash; Passed All Criteria", approved_jobs, "sec-em")
+           or '<div class="empty">No approved jobs yet &mdash; screening in progress…</div>')
         + sec("Applied", applied, "sec-nw")
-        + sec("Rejected", rejected, "sec-sk")
+    )
+
+    # ── Rejected view: jobs that failed at least one criterion ────────────────
+    rejected_tab=(
+        sec("Rejected &mdash; Failed a Criterion", rejected, "sec-sk")
+        or '<div class="empty">No rejected jobs yet.</div>'
     )
 
     from job_scanner.quality import CRITERIA
@@ -560,11 +568,13 @@ def _render_page() -> str:
 
         f'    <nav class="tabs">\n'
         f'      <button class="tab active" data-tab="overview" onclick="switchTab(\'overview\')">Overview</button>\n'
-        f'      <button class="tab" data-tab="jobs" onclick="switchTab(\'jobs\')">Jobs ({total})</button>\n'
+        f'      <button class="tab" data-tab="approved" onclick="switchTab(\'approved\')">Approved ({apc})</button>\n'
+        f'      <button class="tab" data-tab="rejected" onclick="switchTab(\'rejected\')">Rejected ({rc})</button>\n'
         f'    </nav>\n'
 
         f'    <div class="tabp active" id="tab-overview">{overview_tab}</div>\n'
-        f'    <div class="tabp" id="tab-jobs">{jobs_tab}</div>\n'
+        f'    <div class="tabp" id="tab-approved">{approved_tab}</div>\n'
+        f'    <div class="tabp" id="tab-rejected">{rejected_tab}</div>\n'
 
         f'    <footer class="footer">\n'
         f'      <span>Jobs Auto Scanner</span>\n'
