@@ -26,6 +26,7 @@ SCAN_INTERVAL_SECONDS = 20 * 60  # scan every 20 minutes
 DEFAULT_ROLES   = ["Software Engineer", "ML Engineer", "Backend Engineer"]
 MIN_SCORE_GOOD  = 70             # approved jobs at/above this fit score are flagged "strong"
 MAX_SCREEN_CONCURRENCY = 3       # concurrent jobs sent to the local LLM during a scan
+MAX_JOB_AGE_DAYS = 7             # ignore / expire postings older than this (dated jobs only)
 
 # ── LLM (LM Studio) ────────────────────────────────────────────────────────────
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://192.168.86.22:1234/v1")

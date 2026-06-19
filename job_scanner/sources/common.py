@@ -6,8 +6,9 @@ import asyncio
 import re
 from datetime import datetime, timezone, timedelta
 import httpx
+import config
 
-MAX_AGE_DAYS = 14
+MAX_AGE_DAYS = config.MAX_JOB_AGE_DAYS
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; jobs-auto-scanner/1.0)",
     "Accept": "application/json",

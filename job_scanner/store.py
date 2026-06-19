@@ -118,7 +118,7 @@ def update_status(job_id: str, status: str) -> None:
     c.close()
 
 
-def expire_old_jobs(max_age_days: int = 10) -> int:
+def expire_old_jobs(max_age_days: int = 7) -> int:
     """Mark approved jobs older than max_age_days as 'skip' so the list stays fresh."""
     c = _conn()
     c.execute(

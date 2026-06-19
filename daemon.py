@@ -31,9 +31,10 @@ async def _scan_loop(scan_interval: int) -> None:
     while True:
         console.print(Rule(f"[bold cyan]Scan {cycle}[/bold cyan] — {time.strftime('%H:%M:%S')}"))
         try:
-            expired = await asyncio.get_running_loop().run_in_executor(None, expire_old_jobs, 10)
+            expired = await asyncio.get_running_loop().run_in_executor(
+                None, expire_old_jobs, config.MAX_JOB_AGE_DAYS)
             if expired:
-                console.print(f"  [dim]Expired {expired} job(s) older than 10 days → skip[/dim]")
+                console.print(f"  [dim]Expired {expired} job(s) older than {config.MAX_JOB_AGE_DAYS} days → skip[/dim]")
             result = await run_scan(
                 roles=config.DEFAULT_ROLES,
                 max_concurrent=config.MAX_SCREEN_CONCURRENCY,
