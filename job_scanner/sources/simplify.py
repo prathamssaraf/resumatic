@@ -72,7 +72,7 @@ async def _fetch_description(url: str) -> str:
                     f"https://boards-api.greenhouse.io/v1/boards/jobs/{job_id}"
                 )
                 if isinstance(data, dict) and data.get("content"):
-                    return strip_html(data["content"])[:3000]
+                    return strip_html(data["content"])[:100000]
 
         if ats == "lever":
             # https://jobs.lever.co/{slug}/{id}
@@ -86,7 +86,7 @@ async def _fetch_description(url: str) -> str:
                     return (
                         (data.get("descriptionPlain") or "") + "\n" +
                         (data.get("additionalPlain") or "")
-                    ).strip()[:3000]
+                    ).strip()[:100000]
 
         if ats == "ashby":
             # https://jobs.ashbyhq.com/{slug}/{id}
@@ -100,7 +100,7 @@ async def _fetch_description(url: str) -> str:
                     return strip_html(
                         data.get("descriptionHtml") or
                         data.get("descriptionPlain") or ""
-                    )[:3000]
+                    )[:100000]
 
         # Fallback: plain HTTP fetch
         async with httpx.AsyncClient(timeout=15, follow_redirects=True, verify=False) as c:

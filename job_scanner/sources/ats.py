@@ -25,7 +25,7 @@ async def scrape_greenhouse(slug: str) -> list[dict]:
             "company": slug.replace("-", " ").title(),
             "url": j.get("absolute_url", ""),
             "platform": "greenhouse",
-            "description": desc[:3000],
+            "description": desc[:100000],
             "location": loc,
             "posted_date": parse_date(j.get("updated_at", "")),
         })
@@ -45,7 +45,7 @@ async def scrape_lever(slug: str) -> list[dict]:
             "company": slug.replace("-", " ").title(),
             "url": j.get("hostedUrl", ""),
             "platform": "lever",
-            "description": desc.strip()[:3000],
+            "description": desc.strip()[:100000],
             "location": loc,
             "posted_date": parse_date(j.get("createdAt")),
         })
@@ -63,7 +63,7 @@ async def scrape_ashby(slug: str) -> list[dict]:
             "company": slug.replace("-", " ").title(),
             "url": j.get("jobUrl") or j.get("applyUrl", ""),
             "platform": "ashby",
-            "description": desc[:3000],
+            "description": desc[:100000],
             "location": j.get("locationName", ""),
             "posted_date": parse_date(j.get("publishedDate") or j.get("updatedAt", "")),
         })
@@ -88,7 +88,7 @@ async def scrape_workable(slug: str) -> list[dict]:
             "company": slug.replace("-", " ").title(),
             "url": url,
             "platform": "workable",
-            "description": desc.strip()[:3000],
+            "description": desc.strip()[:100000],
             "location": str(loc),
             "posted_date": parse_date(j.get("published_on") or j.get("created_at", "")),
         })

@@ -51,13 +51,23 @@ CRITERIA: list[tuple[str, str]] = [
      "clearance, ITAR eligibility, or states that no sponsorship is available."),
 ]
 
-_MAX_DESC = 4000  # cap the JD excerpt sent to the model
+_MAX_DESC = 100000  # effectively no cap — send the whole JD to the model
 
 
 def _excerpt(desc: str) -> str:
+    """
+    Clean and cap the JD. Requirements (seniority, years of experience) almost
+    always sit at the END of a posting, so for over-length JDs we keep both the
+    head and the tail rather than truncating from the front — otherwise the
+    screen never sees "7+ years" and wrongly approves senior roles.
+    """
     clean = re.sub(r"<[^>]+>", " ", desc or "")
     clean = re.sub(r"\s+", " ", clean).strip()
-    return clean[:_MAX_DESC]
+    if len(clean) <= _MAX_DESC:
+        return clean
+    head = clean[: int(_MAX_DESC * 0.65)]
+    tail = clean[-int(_MAX_DESC * 0.35):]
+    return f"{head}\n…[middle trimmed]…\n{tail}"
 
 
 def _job_block(title: str, location: str, desc: str) -> str:
