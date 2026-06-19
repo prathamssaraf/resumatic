@@ -10,7 +10,9 @@ from rich.table import Table
 from rich import box
 
 from .sources.ats import scrape_greenhouse, scrape_lever, scrape_ashby, scrape_workable
-from .sources.aggregators import scrape_remoteok, scrape_remotive, scrape_jobicy
+from .sources.aggregators import (
+    scrape_remoteok, scrape_remotive, scrape_jobicy, scrape_themuse, scrape_himalayas,
+)
 from .sources.hn import scrape_hn_hiring, scrape_hn_search
 from .sources.simplify import scrape_simplify
 from .quality import evaluate_job, CRITERIA
@@ -73,6 +75,36 @@ DEFAULT_ATS: list[tuple[str, str]] = [
     ("lever", "netflix"),
     ("lever", "palantir"),
     ("lever", "plaid"),
+
+    # ── Consumer / fintech / marketplace (high early-career volume) ────────────
+    ("greenhouse", "discord"),
+    ("greenhouse", "robinhood"),
+    ("greenhouse", "coinbase"),
+    ("greenhouse", "gusto"),
+    ("greenhouse", "samsara"),
+    ("greenhouse", "instacart"),
+    ("greenhouse", "affirm"),
+    ("greenhouse", "gitlab"),
+    ("greenhouse", "reddit"),
+    ("greenhouse", "asana"),
+    ("greenhouse", "dropbox"),
+    ("greenhouse", "faire"),
+    ("greenhouse", "lyft"),
+    ("greenhouse", "sofi"),
+    ("greenhouse", "squarespace"),
+    ("greenhouse", "flexport"),
+    ("greenhouse", "pinterest"),
+
+    # ── More AI / agent startups (Ashby) ──────────────────────────────────────
+    ("ashby", "vanta"),
+    ("ashby", "watershed"),
+    ("ashby", "sardine"),
+    ("ashby", "baseten"),
+    ("ashby", "mintlify"),
+    ("ashby", "sierra"),
+    ("ashby", "decagon"),
+    ("ashby", "harvey"),
+    ("ashby", "suno"),
 ]
 
 
@@ -123,11 +155,13 @@ async def run_scan(
 
         # Aggregators
         if include_aggregators:
-            task = progress.add_task("Scanning RemoteOK, Remotive, Jobicy...", total=None)
+            task = progress.add_task("Scanning RemoteOK, Remotive, Jobicy, The Muse, Himalayas...", total=None)
             agg_results = await asyncio.gather(
                 scrape_remoteok(roles),
                 scrape_remotive(roles),
                 scrape_jobicy(roles),
+                scrape_themuse(roles),
+                scrape_himalayas(roles),
                 return_exceptions=True,
             )
             for r in agg_results:
