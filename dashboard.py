@@ -307,6 +307,16 @@ body{background:var(--bg);color:var(--tx);font-family:var(--fm);font-size:13px;
 .mark-applied-done{font-size:9.5px;font-weight:700;letter-spacing:.08em;
   text-transform:uppercase;color:var(--gr);white-space:nowrap}
 
+/* sort bar */
+.sortbar{display:flex;align-items:center;gap:8px;margin:0 0 10px}
+.sortbar-l{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--t4);font-weight:700}
+.sort-btn{padding:5px 12px;border-radius:5px;font-family:var(--fm);font-size:10px;font-weight:700;
+  letter-spacing:.08em;text-transform:uppercase;cursor:pointer;border:1px solid var(--bd);
+  background:var(--sf2);color:var(--t2);transition:all .12s}
+.sort-btn:hover{border-color:var(--ac);color:var(--ac)}
+.sort-btn.active{background:var(--ac);color:#fff;border-color:var(--ac)}
+.sort-btn .arr{margin-left:5px;opacity:.8}
+
 /* footer */
 .footer{margin-top:60px;padding-top:18px;border-top:1px solid var(--bd);
   display:flex;justify-content:space-between;font-size:10px;color:var(--t4);letter-spacing:.08em}
@@ -414,6 +424,42 @@ function markApplied(jobId, btn) {
   })
   .catch(function(){ btn.disabled = false; btn.textContent = '✓ Mark Applied'; });
 }
+
+// ── Approved-grid sorting (client-side, persisted) ────────────────────────────
+function _applySort(gridId, key, dir) {
+  var grid = document.getElementById(gridId);
+  if (!grid) return;
+  var rows = Array.prototype.slice.call(grid.querySelectorAll('.dgr'));
+  rows.sort(function(a, b) {
+    var va, vb;
+    if (key === 'score') { va = parseFloat(a.dataset.score) || 0; vb = parseFloat(b.dataset.score) || 0; }
+    else                 { va = a.dataset.date || ''; vb = b.dataset.date || ''; }
+    if (va < vb) return dir === 'asc' ? -1 : 1;
+    if (va > vb) return dir === 'asc' ?  1 : -1;
+    return 0;
+  });
+  rows.forEach(function(r){ grid.appendChild(r); });
+  document.querySelectorAll('.sort-btn').forEach(function(btn) {
+    var active = btn.dataset.key === key;
+    btn.classList.toggle('active', active);
+    var base = btn.dataset.key === 'date' ? 'Date' : 'Rating';
+    btn.innerHTML = base + (active ? '<span class="arr">' + (dir === 'asc' ? '↑' : '↓') + '</span>' : '');
+  });
+}
+function sortGrid(gridId, key) {
+  var saved = {};
+  try { saved = JSON.parse(localStorage.getItem('approvedSort') || '{}'); } catch(e) {}
+  var dir = (saved.key === key && saved.dir === 'desc') ? 'asc' : 'desc';
+  _applySort(gridId, key, dir);
+  try { localStorage.setItem('approvedSort', JSON.stringify({grid: gridId, key: key, dir: dir})); } catch(e) {}
+}
+(function() {
+  // Re-apply the saved sort on every load (the page fully refreshes each 20s).
+  var saved = null;
+  try { saved = JSON.parse(localStorage.getItem('approvedSort') || 'null'); } catch(e) {}
+  if (!saved) saved = {grid: 'approved-grid', key: 'date', dir: 'desc'};
+  if (document.getElementById(saved.grid)) _applySort(saved.grid, saved.key, saved.dir);
+})();
 """
 
 
@@ -439,13 +485,14 @@ def _score_arc(score: int) -> str:
     )
 
 
-def _jobs_grid(jobs: list[dict], mark_applied: bool = True) -> str:
+def _jobs_grid(jobs: list[dict], mark_applied: bool = True, grid_id: str = "") -> str:
     if not jobs:
         return '<div class="empty">No jobs</div>'
     rows = []
     for j in jobs:
         co=_esc(j.get("company",""));ti=_esc(j.get("title",""))
-        pl=_esc(j.get("platform","—"));dt=(j.get("posted_date") or "")[:10] or "—"
+        date_raw=(j.get("posted_date") or "")
+        pl=_esc(j.get("platform","—"));dt=date_raw[:10] or "—"
         sc=j.get("score",0);st=j.get("status","new")
         jid=j.get("id","")
         url=_esc(j.get("url",""));rs=_esc(j.get("score_reason",""))
@@ -458,7 +505,7 @@ def _jobs_grid(jobs: list[dict], mark_applied: bool = True) -> str:
             mark_btn = ""
         actions = f'<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">{apply}{mark_btn}</div>'
         rows.append(
-            f'<div class="dgr">'
+            f'<div class="dgr" data-score="{sc}" data-date="{_esc(date_raw)}">'
             f'<div class="gc">{_score_arc(sc)}</div>'
             f'<div class="gc"><div class="jt" title="{ti}">{ti}</div><div class="jco">{co}</div></div>'
             f'<div class="gc"><span class="jpl">{pl}</span></div>'
@@ -472,7 +519,8 @@ def _jobs_grid(jobs: list[dict], mark_applied: bool = True) -> str:
         '<div class="dgh"><span></span><span>Role / Company</span><span>Source</span>'
         '<span>Posted</span><span>Match</span><span>Status</span><span></span></div>'
     )
-    return f'<div class="dg">{hdr}{"".join(rows)}</div>'
+    idattr = f' id="{grid_id}"' if grid_id else ""
+    return f'<div class="dg"{idattr}>{hdr}{"".join(rows)}</div>'
 
 
 def _render_page() -> str:
@@ -493,20 +541,29 @@ def _render_page() -> str:
         f'<div class="sc cs"><div class="sn">{rc}</div><div class="sl">Rejected</div></div>'
     )
 
-    def sec(title, jobs, cls):
+    def sec(title, jobs, cls, grid_id=""):
         if not jobs: return ""
         return (
             f'<div class="sec {cls}"><div class="sech">'
             f'<div class="secbar"></div><span class="sect">{title}</span>'
             f'<span class="secc">{len(jobs)}</span><span class="secv">&#x203A;</span>'
-            f'</div><div class="secbd">{_jobs_grid(jobs)}</div></div>'
+            f'</div><div class="secbd">{_jobs_grid(jobs, grid_id=grid_id)}</div></div>'
         )
+
+    # Sort toolbar for the approved grid (client-side, persisted in localStorage)
+    sort_bar = (
+        '<div class="sortbar">'
+        '<span class="sortbar-l">Sort by</span>'
+        '<button class="sort-btn" data-key="date" onclick="sortGrid(\'approved-grid\',\'date\')">Date</button>'
+        '<button class="sort-btn" data-key="score" onclick="sortGrid(\'approved-grid\',\'score\')">Rating</button>'
+        '</div>'
+    )
 
     # ── Approved view: approved jobs + the ones you've already applied to ──────
     approved_tab=(
         f'<div class="plats"><span class="plats-l">Sources</span>{plat_pills}</div>'
-        + (sec("Approved &mdash; Passed All Criteria", approved_jobs, "sec-em")
-           or '<div class="empty">No approved jobs yet &mdash; screening in progress…</div>')
+        + (((sort_bar + sec("Approved &mdash; Passed All Criteria", approved_jobs, "sec-em", "approved-grid")))
+           if approved_jobs else '<div class="empty">No approved jobs yet &mdash; screening in progress…</div>')
         + sec("Applied", applied, "sec-nw")
     )
 
