@@ -168,6 +168,24 @@ DEFAULT_ATS: list[tuple[str, str]] = [
 ]
 
 
+# Hard wall-clock cap per source. Without this, a single slow/hanging source
+# (e.g. a Cloudflare-fronted board that trickles bytes so the read timeout never
+# fires) stalls the entire scan cycle and it never reaches screening.
+_SOURCE_TIMEOUT = 45
+
+
+async def _guard(coro, name: str, timeout: int = _SOURCE_TIMEOUT) -> list[dict]:
+    """Run a scraper coroutine with a hard timeout; return [] on timeout/error."""
+    try:
+        return await asyncio.wait_for(coro, timeout)
+    except asyncio.TimeoutError:
+        console.print(f"[dim]  ⚠ {name}: timed out after {timeout}s[/dim]")
+        return []
+    except Exception as e:
+        console.print(f"[dim]  ⚠ {name}: {e}[/dim]")
+        return []
+
+
 async def _run_ats(provider: str, slug: str) -> list[dict]:
     scrapers = {
         "greenhouse": scrape_greenhouse,
@@ -178,11 +196,7 @@ async def _run_ats(provider: str, slug: str) -> list[dict]:
     fn = scrapers.get(provider)
     if not fn:
         return []
-    try:
-        return await fn(slug)
-    except Exception as e:
-        console.print(f"[dim]  ⚠ {provider}/{slug}: {e}[/dim]")
-        return []
+    return await _guard(fn(slug), f"{provider}/{slug}")
 
 
 async def run_scan(
@@ -217,11 +231,11 @@ async def run_scan(
         if include_aggregators:
             task = progress.add_task("Scanning RemoteOK, Remotive, Jobicy, The Muse, Himalayas...", total=None)
             agg_results = await asyncio.gather(
-                scrape_remoteok(roles),
-                scrape_remotive(roles),
-                scrape_jobicy(roles),
-                scrape_themuse(roles),
-                scrape_himalayas(roles),
+                _guard(scrape_remoteok(roles), "remoteok"),
+                _guard(scrape_remotive(roles), "remotive"),
+                _guard(scrape_jobicy(roles), "jobicy"),
+                _guard(scrape_themuse(roles), "themuse"),
+                _guard(scrape_himalayas(roles), "himalayas"),
                 return_exceptions=True,
             )
             for r in agg_results:
@@ -232,19 +246,15 @@ async def run_scan(
         # SimplifyJobs new-grad feed
         if include_simplify:
             task = progress.add_task("Scanning SimplifyJobs new-grad feed...", total=None)
-            try:
-                simplify_jobs = await scrape_simplify(roles)
-                all_raw.extend(simplify_jobs)
-            except Exception as e:
-                console.print(f"[dim]  ⚠ simplify: {e}[/dim]")
+            all_raw.extend(await _guard(scrape_simplify(roles), "simplify"))
             progress.remove_task(task)
 
         # HN
         if include_hn:
             task = progress.add_task("Scanning HN Who's Hiring...", total=None)
             hn_results = await asyncio.gather(
-                scrape_hn_hiring(roles),
-                *[scrape_hn_search(r) for r in roles[:3]],
+                _guard(scrape_hn_hiring(roles), "hn-hiring"),
+                *[_guard(scrape_hn_search(r), "hn-search") for r in roles[:3]],
                 return_exceptions=True,
             )
             for r in hn_results:
