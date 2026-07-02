@@ -51,7 +51,11 @@ CRITERIA: list[tuple[str, str]] = [
      "clearance, ITAR eligibility, or states that no sponsorship is available."),
 ]
 
-_MAX_DESC = 100000  # effectively no cap — send the whole JD to the model
+# Bound the JD sent to the model. Full JDs are stored in the DB, but sending a
+# huge prompt to a *reasoning* model makes it burn its whole token budget on
+# reasoning and return empty content. 12k chars (~3k tokens) keeps head+tail
+# (so the requirements section at the end survives) while staying responsive.
+_MAX_DESC = 12000
 
 
 def _excerpt(desc: str) -> str:
@@ -93,7 +97,7 @@ def check_criterion(question: str, title: str, desc: str, location: str = "") ->
         'Respond with JSON only: {"pass": true|false, "reason": "<short phrase>"}.'
     )
     user = f"Criterion: {question}\n\n" + _job_block(title, location, desc)
-    result = call_json(system, user, max_tokens=512, temperature=0.1)
+    result = call_json(system, user, max_tokens=3000, temperature=0.1)
     if not isinstance(result, dict):
         raise RuntimeError(f"check_criterion: expected dict, got {type(result).__name__}")
     return bool(result.get("pass", False)), str(result.get("reason", "")).strip()
@@ -108,7 +112,7 @@ def score_fit(title: str, desc: str, location: str = "") -> tuple[int, str]:
         'Respond with JSON only: {"score": <int 0-100>, "reason": "<short phrase>"}.'
     )
     user = _job_block(title, location, desc)
-    result = call_json(system, user, max_tokens=512, temperature=0.2)
+    result = call_json(system, user, max_tokens=3000, temperature=0.2)
     if not isinstance(result, dict):
         raise RuntimeError(f"score_fit: expected dict, got {type(result).__name__}")
     try:
