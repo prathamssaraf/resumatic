@@ -273,7 +273,7 @@ async def run_scan(
     # ── Free gates (no LLM): dedup by URL, drop no-URL/stale, drop known ──────
     # These are mechanical de-noising so Gemma only ever evaluates fresh, unseen
     # postings — never the same ~1000+ jobs every cycle.
-    from .store import existing_job_ids, job_id as _job_id
+    from .store import existing_job_ids, existing_urls, job_id as _job_id
     from .sources.common import is_recent
 
     seen_urls: set[str] = set()
@@ -285,11 +285,17 @@ async def run_scan(
             deduped.append(j)
 
     known = existing_job_ids()
+    known_urls = existing_urls()
+    # Exclude anything already stored by BOTH keys: id = md5(company|title) AND the
+    # UNIQUE url. Filtering only by id let title/company drift smuggle a job past
+    # the gate, where it then bounced on the url constraint and got re-screened
+    # every cycle forever (burning the whole LLM budget on uncommittable dupes).
     # Citi grad/analyst programs bypass the 7-day recency gate (long-lived posts).
     candidates = [
         j for j in deduped
         if (is_recent(j.get("posted_date", "")) or j.get("platform") == "citi")
         and _job_id(j) not in known
+        and j.get("url", "") not in known_urls
     ]
 
     # ── LLM screen: each job is checked against every criterion, one call per ─

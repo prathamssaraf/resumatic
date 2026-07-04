@@ -64,6 +64,16 @@ def existing_job_ids() -> set[str]:
     return {r[0] for r in rows}
 
 
+def existing_urls() -> set[str]:
+    """All job URLs already in the DB. The table has a UNIQUE(url) constraint, so a
+    job whose URL is already stored can never be inserted (it bounces as a dup) —
+    must be excluded from the candidate set or it gets re-screened every cycle."""
+    c = _conn()
+    rows = c.execute("SELECT url FROM jobs WHERE url != ''").fetchall()
+    c.close()
+    return {r[0] for r in rows}
+
+
 def save_jobs(jobs: list[dict]) -> tuple[int, int]:
     """Insert new jobs. Returns (inserted, duplicate) counts."""
     c = _conn()
