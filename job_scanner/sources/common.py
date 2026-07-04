@@ -33,6 +33,24 @@ async def json_get(url: str, params: dict | None = None, headers: dict | None = 
     return {}
 
 
+async def text_get(url: str, params: dict | None = None, headers: dict | None = None) -> str:
+    """Fetch a URL and return the raw response text (for HTML pages). '' on failure."""
+    h = {**_HEADERS, "Accept": "text/html,application/xhtml+xml", **(headers or {})}
+    for attempt in range(4):
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True, verify=False) as c:
+                resp = await c.get(url, params=params, headers=h)
+                if resp.status_code == 429:
+                    await asyncio.sleep(int(resp.headers.get("Retry-After", 5 * (attempt + 1))))
+                    continue
+                resp.raise_for_status()
+                return resp.text
+        except (httpx.TimeoutException, httpx.RemoteProtocolError, httpx.ConnectError):
+            if attempt < 3:
+                await asyncio.sleep(2 ** attempt)
+    return ""
+
+
 def parse_date(value: str | int | float | None) -> str:
     """Parse any date-ish value to ISO 8601 string. Returns empty string on failure."""
     if not value:

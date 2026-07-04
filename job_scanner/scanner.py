@@ -15,6 +15,7 @@ from .sources.aggregators import (
 )
 from .sources.hn import scrape_hn_hiring, scrape_hn_search
 from .sources.simplify import scrape_simplify
+from .sources.citi import scrape_citi
 from .quality import evaluate_job, CRITERIA
 from .store import save_jobs, list_jobs, stats
 
@@ -205,6 +206,7 @@ async def run_scan(
     include_aggregators: bool = True,
     include_hn: bool = True,
     include_simplify: bool = True,
+    include_citi: bool = True,
     max_concurrent: int = 3,
 ) -> dict:
     watchlist = ats_watchlist if ats_watchlist is not None else DEFAULT_ATS
@@ -249,6 +251,12 @@ async def run_scan(
             all_raw.extend(await _guard(scrape_simplify(roles), "simplify"))
             progress.remove_task(task)
 
+        # Citi grad/analyst programs (US only; fetches per-job detail pages)
+        if include_citi:
+            task = progress.add_task("Scanning Citi grad programs (US)...", total=None)
+            all_raw.extend(await _guard(scrape_citi(roles), "citi", timeout=120))
+            progress.remove_task(task)
+
         # HN
         if include_hn:
             task = progress.add_task("Scanning HN Who's Hiring...", total=None)
@@ -277,9 +285,11 @@ async def run_scan(
             deduped.append(j)
 
     known = existing_job_ids()
+    # Citi grad/analyst programs bypass the 7-day recency gate (long-lived posts).
     candidates = [
         j for j in deduped
-        if is_recent(j.get("posted_date", "")) and _job_id(j) not in known
+        if (is_recent(j.get("posted_date", "")) or j.get("platform") == "citi")
+        and _job_id(j) not in known
     ]
 
     # ── LLM screen: each job is checked against every criterion, one call per ─

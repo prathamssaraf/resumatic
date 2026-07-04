@@ -123,7 +123,7 @@ def expire_old_jobs(max_age_days: int = 7) -> int:
     c = _conn()
     c.execute(
         "UPDATE jobs SET status='skip' WHERE status='approved' AND posted_date != '' "
-        "AND posted_date < datetime('now', ?)",
+        "AND platform != 'citi' AND posted_date < datetime('now', ?)",
         (f"-{max_age_days} days",)
     )
     count = c.total_changes

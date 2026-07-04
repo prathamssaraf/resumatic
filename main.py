@@ -22,6 +22,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
         include_aggregators=not args.no_aggregators,
         include_hn=not args.no_hn,
         include_simplify=not args.no_simplify,
+        include_citi=not args.no_citi,
     ))
     print_results(result)
 
@@ -52,6 +53,7 @@ def main() -> None:
     scan_p.add_argument("--no-aggregators", action="store_true", help="Skip RemoteOK/Remotive/Jobicy")
     scan_p.add_argument("--no-hn", action="store_true", help="Skip Hacker News")
     scan_p.add_argument("--no-simplify", action="store_true", help="Skip SimplifyJobs feed")
+    scan_p.add_argument("--no-citi", action="store_true", help="Skip Citi grad programs")
     scan_p.set_defaults(func=cmd_scan)
 
     # list

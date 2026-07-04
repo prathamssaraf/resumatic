@@ -51,6 +51,24 @@ CRITERIA: list[tuple[str, str]] = [
      "clearance, ITAR eligibility, or states that no sponsorship is available."),
 ]
 
+# Citi grad/analyst programs use a wider role gate: the candidate has a technical
+# degree and is open to software/tech roles, investment-banking / financial
+# analyst programs, and any early-career program that accepts a tech background.
+# Everything else (level, experience, location, sponsorship, full-time) is the
+# same as the global screen. Selected per-job in evaluate_job by platform.
+_CITI_ROLE_TYPE = (
+    "role_type",
+    "Could someone with a technical or computer-science degree apply to this role? "
+    "Answer yes for software / ML / data / engineering roles, technology analyst or "
+    "rotational programs, quantitative roles, AND investment banking or financial "
+    "analyst graduate/full-time analyst programs. Answer no only if it clearly "
+    "requires a non-technical specialization the candidate lacks (e.g., pure legal, "
+    "HR, clinical, or a licensed profession).",
+)
+CITI_CRITERIA: list[tuple[str, str]] = [
+    _CITI_ROLE_TYPE if key == "role_type" else (key, q) for key, q in CRITERIA
+]
+
 # Bound the JD sent to the model. Full JDs are stored in the DB, but sending a
 # huge prompt to a *reasoning* model makes it burn its whole token budget on
 # reasoning and return empty content. 12k chars (~3k tokens) keeps head+tail
@@ -132,7 +150,9 @@ def evaluate_job(job: dict) -> dict:
     title    = job.get("title", "")
     desc     = job.get("description", "")
     location = job.get("location", "")
-    for key, question in CRITERIA:
+    # Citi grad/analyst programs get the wider role gate; everything else strict.
+    criteria = CITI_CRITERIA if job.get("platform") == "citi" else CRITERIA
+    for key, question in criteria:
         passed, reason = check_criterion(question, title, desc, location)
         if not passed:
             return {
