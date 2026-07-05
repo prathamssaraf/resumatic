@@ -57,6 +57,18 @@ def _parse_job(doc: str, href: str, cutoff: str) -> dict | None:
     desc = html.unescape(re.sub(r"\s+", " ", desc)).strip()
     posted = parse_date(d.get("datePosted", ""))
 
+    # Structured pay (US pay-transparency postings carry baseSalary MonetaryAmount)
+    salary = ""
+    bs = d.get("baseSalary") or {}
+    val = bs.get("value") if isinstance(bs, dict) else None
+    if isinstance(val, dict):
+        lo, hi = val.get("minValue"), val.get("maxValue")
+        unit = (val.get("unitText") or "").lower()
+        cur = bs.get("currency", "USD")
+        if lo or hi:
+            rng = f"{lo}-{hi}" if lo and hi and lo != hi else f"{lo or hi}"
+            salary = f"{cur} {rng}/{unit or 'year'}"
+
     job = {
         "title": d.get("title", ""),
         "company": "Citi",
@@ -64,6 +76,7 @@ def _parse_job(doc: str, href: str, cutoff: str) -> dict | None:
         "platform": "citi",
         "description": desc[:100000],
         "location": location or "United States",
+        "salary": salary,
         "posted_date": posted,
     }
     if country not in _US_COUNTRIES:

@@ -26,6 +26,19 @@ CANDIDATE = (
 # Checked top-to-bottom, stopping at the first failure, so put the cheapest /
 # most-common rejections first. Each question is answered yes/no by the model,
 # where "yes" means the job satisfies the criterion. Edit freely.
+
+# Salary gate — last for every source so short-circuiting means it only costs an
+# extra LLM call for jobs that already passed everything else. Conservative:
+# unknown/unstated salary passes; only a clearly-below-$70k figure fails.
+_SALARY_CRITERION: tuple[str, str] = (
+    "salary",
+    "Does this role pay at least $70,000 per year? Answer yes if it lists a salary "
+    "of $70,000/year or more, OR does not state any salary (unknown). Answer no "
+    "ONLY if it clearly pays less than $70,000/year — e.g. a stated salary or range "
+    "whose upper end is under $70k, or an hourly rate below about $34/hour for a "
+    "full-time role.",
+)
+
 CRITERIA: list[tuple[str, str]] = [
     ("legitimate",
      "Is this a legitimate, paid job posting (NOT unpaid, equity-only, "
@@ -49,6 +62,7 @@ CRITERIA: list[tuple[str, str]] = [
      "Could a candidate who needs future US visa sponsorship take this role? "
      "Answer no ONLY if it explicitly requires US citizenship, an active security "
      "clearance, ITAR eligibility, or states that no sponsorship is available."),
+    _SALARY_CRITERION,
 ]
 
 # Citi has its OWN two-gate screen (per the user's rules), applied to every US
@@ -70,6 +84,7 @@ CITI_CRITERIA: list[tuple[str, str]] = [
      "candidate would not have — for example an MBA, a finance/accounting/economics "
      "degree, a law degree, a medical/clinical license, or a specific professional "
      "certification. If it accepts any degree or a technical degree, answer yes."),
+    _SALARY_CRITERION,
 ]
 
 # Bound the JD sent to the model. Full JDs are stored in the DB, but sending a
@@ -95,36 +110,39 @@ def _excerpt(desc: str) -> str:
     return f"{head}\n…[middle trimmed]…\n{tail}"
 
 
-def _job_block(title: str, location: str, desc: str) -> str:
+def _job_block(title: str, location: str, desc: str, salary: str = "") -> str:
     loc = location.strip() if location else "(not specified)"
+    sal = salary.strip() if salary else "(not stated)"
     return (
         f"Job Title: {title}\n"
-        f"Job Location (from the source listing): {loc}\n\n"
+        f"Job Location (from the source listing): {loc}\n"
+        f"Listed salary (from the source listing): {sal}\n\n"
         f"Job Posting:\n{_excerpt(desc)}"
     )
 
 
-def check_criterion(question: str, title: str, desc: str, location: str = "") -> tuple[bool, str]:
+def check_criterion(question: str, title: str, desc: str,
+                    location: str = "", salary: str = "") -> tuple[bool, str]:
     """
     Ask Gemma a single yes/no criterion about one job. Returns (passed, reason).
     Raises on LLM failure — the caller skips the job this cycle and retries.
     """
     system = (
         "You screen job postings for a specific candidate.\n" + CANDIDATE +
-        "\n\nYou are given ONE yes/no criterion. Judge it using the job posting "
-        "and its listed location. 'pass' = true means the job SATISFIES the "
-        "criterion. If the posting truly gives no relevant information, lean "
-        "towards true. "
+        "\n\nYou are given ONE yes/no criterion. Judge it using the job posting, "
+        "its listed location, and any listed salary. 'pass' = true means the job "
+        "SATISFIES the criterion. If the posting truly gives no relevant "
+        "information, lean towards true. "
         'Respond with JSON only: {"pass": true|false, "reason": "<short phrase>"}.'
     )
-    user = f"Criterion: {question}\n\n" + _job_block(title, location, desc)
+    user = f"Criterion: {question}\n\n" + _job_block(title, location, desc, salary)
     result = call_json(system, user, max_tokens=3000, temperature=0.1)
     if not isinstance(result, dict):
         raise RuntimeError(f"check_criterion: expected dict, got {type(result).__name__}")
     return bool(result.get("pass", False)), str(result.get("reason", "")).strip()
 
 
-def score_fit(title: str, desc: str, location: str = "") -> tuple[int, str]:
+def score_fit(title: str, desc: str, location: str = "", salary: str = "") -> tuple[int, str]:
     """Ask Gemma to rate overall fit 0-100 for an already-approved job."""
     system = (
         "You rate how well a job fits a specific candidate.\n" + CANDIDATE +
@@ -132,7 +150,7 @@ def score_fit(title: str, desc: str, location: str = "") -> tuple[int, str]:
         "skills and level) and a one-line reason. "
         'Respond with JSON only: {"score": <int 0-100>, "reason": "<short phrase>"}.'
     )
-    user = _job_block(title, location, desc)
+    user = _job_block(title, location, desc, salary)
     result = call_json(system, user, max_tokens=3000, temperature=0.2)
     if not isinstance(result, dict):
         raise RuntimeError(f"score_fit: expected dict, got {type(result).__name__}")
@@ -153,10 +171,11 @@ def evaluate_job(job: dict) -> dict:
     title    = job.get("title", "")
     desc     = job.get("description", "")
     location = job.get("location", "")
+    salary   = job.get("salary", "")
     # Citi grad/analyst programs get the wider role gate; everything else strict.
     criteria = CITI_CRITERIA if job.get("platform") == "citi" else CRITERIA
     for key, question in criteria:
-        passed, reason = check_criterion(question, title, desc, location)
+        passed, reason = check_criterion(question, title, desc, location, salary)
         if not passed:
             return {
                 "approved": False,
@@ -164,5 +183,5 @@ def evaluate_job(job: dict) -> dict:
                 "reason": f"{key}: {reason}" if reason else f"failed {key}",
                 "failed": key,
             }
-    score, reason = score_fit(title, desc, location)
+    score, reason = score_fit(title, desc, location, salary)
     return {"approved": True, "score": score, "reason": reason, "failed": None}
