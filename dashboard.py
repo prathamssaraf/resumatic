@@ -308,8 +308,14 @@ body{background:var(--bg);color:var(--tx);font-family:var(--fm);font-size:13px;
   text-transform:uppercase;color:var(--gr);white-space:nowrap}
 
 /* sort bar */
-.sortbar{display:flex;align-items:center;gap:8px;margin:0 0 10px}
+.sortbar{display:flex;align-items:center;gap:8px;margin:0 0 10px;flex-wrap:wrap}
 .sortbar-l{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--t4);font-weight:700}
+.search-box{flex:1;min-width:180px;max-width:360px;padding:6px 12px;border-radius:5px;
+  border:1px solid var(--bd);background:var(--sf);color:var(--tx);font-family:var(--fm);
+  font-size:12px;outline:none;transition:border-color .12s}
+.search-box:focus{border-color:var(--ac)}
+.search-box::placeholder{color:var(--t4)}
+.search-count{font-size:10px;color:var(--t4);letter-spacing:.04em;white-space:nowrap}
 .sort-btn{padding:5px 12px;border-radius:5px;font-family:var(--fm);font-size:10px;font-weight:700;
   letter-spacing:.08em;text-transform:uppercase;cursor:pointer;border:1px solid var(--bd);
   background:var(--sf2);color:var(--t2);transition:all .12s}
@@ -453,6 +459,30 @@ function sortGrid(gridId, key) {
   _applySort(gridId, key, dir);
   try { localStorage.setItem('approvedSort', JSON.stringify({grid: gridId, key: key, dir: dir})); } catch(e) {}
 }
+
+// ── Approved-grid search (client-side, persisted) ─────────────────────────────
+function filterGrid(gridId, query) {
+  var grid = document.getElementById(gridId);
+  if (!grid) return;
+  var q = (query || '').trim().toLowerCase();
+  var shown = 0, total = 0;
+  grid.querySelectorAll('.dgr').forEach(function(row) {
+    total++;
+    var hit = !q || row.textContent.toLowerCase().indexOf(q) !== -1;
+    row.style.display = hit ? '' : 'none';
+    if (hit) shown++;
+  });
+  var lbl = document.getElementById('approved-search-count');
+  if (lbl) lbl.textContent = q ? (shown + ' / ' + total + ' match') : '';
+  try { localStorage.setItem('approvedSearch', query || ''); } catch(e) {}
+}
+(function() {
+  var q = '';
+  try { q = localStorage.getItem('approvedSearch') || ''; } catch(e) {}
+  if (!q) return;
+  var box = document.getElementById('approved-search');
+  if (box) { box.value = q; filterGrid('approved-grid', q); }
+})();
 (function() {
   // Re-apply the saved sort on every load (the page fully refreshes each 20s).
   var saved = null;
@@ -553,6 +583,10 @@ def _render_page() -> str:
     # Sort toolbar for the approved grid (client-side, persisted in localStorage)
     sort_bar = (
         '<div class="sortbar">'
+        '<input class="search-box" id="approved-search" type="search" '
+        'placeholder="Search title, company, location, reason…" '
+        'oninput="filterGrid(\'approved-grid\', this.value)">'
+        '<span class="search-count" id="approved-search-count"></span>'
         '<span class="sortbar-l">Sort by</span>'
         '<button class="sort-btn" data-key="date" onclick="sortGrid(\'approved-grid\',\'date\')">Date</button>'
         '<button class="sort-btn" data-key="score" onclick="sortGrid(\'approved-grid\',\'score\')">Rating</button>'
