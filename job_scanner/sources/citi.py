@@ -25,15 +25,22 @@ from .common import text_get, parse_date
 
 BASE = "https://jobs.citi.com"
 RECENT_DAYS = 60  # "past 2 months"
-# Citi's WAF returns 403 to the default bot UA / high concurrency, so use a
-# real browser UA and modest parallelism.
-_UA = {"User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/125.0.0.0 Safari/537.36")}
+# Citi's WAF hard-blocks (403) bursty scraping. Stay polite: a real browser
+# header set, low concurrency, and per-cycle caps so the big backfill is spread
+# over many cycles instead of hammering the site in one shot.
+_UA = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://jobs.citi.com/",
+}
 _US_COUNTRIES = {"united states", "united states of america", "usa", "us"}
 _LD = re.compile(r'type="application/ld\+json"[^>]*>(.*?)</script>', re.DOTALL)
 _HREF = re.compile(r'href="(/job/[^"]+)"')
-_MAX_PAGES = 320  # safety cap (~4800 listings at 15/page)
+_PAGES_PER_CYCLE = 60      # enumerate at most this many listing pages per scan (~900 jobs)
+_MAX_NEW_PER_CYCLE = 80    # fetch at most this many new detail pages per scan
+_REQ_DELAY = 0.25          # polite delay between requests (seconds)
 
 
 def _parse_job(doc: str, href: str, cutoff: str) -> dict | None:
@@ -98,7 +105,7 @@ async def _all_hrefs(concurrency: int) -> list[str]:
         return []
     m = re.search(r"([\d,]+)\s+Results", first)
     total = int(m.group(1).replace(",", "")) if m else 15
-    num_pages = min(_MAX_PAGES, total // 15 + 2)
+    num_pages = min(_PAGES_PER_CYCLE, total // 15 + 2)
 
     sem = asyncio.Semaphore(concurrency)
 
@@ -107,6 +114,7 @@ async def _all_hrefs(concurrency: int) -> list[str]:
             return _HREF.findall(first)
         async with sem:
             doc = await text_get(f"{BASE}/search-jobs?p={pg}", headers=_UA)
+            await asyncio.sleep(_REQ_DELAY)
         return _HREF.findall(doc)
 
     pages = await asyncio.gather(*[_page(pg) for pg in range(1, num_pages + 1)],
@@ -122,12 +130,14 @@ async def _all_hrefs(concurrency: int) -> list[str]:
     return out
 
 
-async def scrape_citi(roles: list[str] | None = None, concurrency: int = 5) -> list[dict]:
+async def scrape_citi(roles: list[str] | None = None, concurrency: int = 3) -> list[dict]:
     from job_scanner.store import existing_urls
     known = existing_urls()
 
     hrefs = await _all_hrefs(concurrency)
-    new = [h for h in hrefs if (BASE + h) not in known]  # fetch each URL only once, ever
+    # Fetch each URL only once, ever, and cap per cycle so the backfill spreads
+    # over many scans rather than hammering Citi (which 403-blocks bursts).
+    new = [h for h in hrefs if (BASE + h) not in known][:_MAX_NEW_PER_CYCLE]
     if not new:
         return []
 
@@ -137,6 +147,7 @@ async def scrape_citi(roles: list[str] | None = None, concurrency: int = 5) -> l
     async def _detail(href: str) -> dict | None:
         async with sem:
             doc = await text_get(BASE + href, headers=_UA)
+            await asyncio.sleep(_REQ_DELAY)
         return _parse_job(doc, href, cutoff) if doc else None
 
     parsed = await asyncio.gather(*[_detail(h) for h in new], return_exceptions=True)

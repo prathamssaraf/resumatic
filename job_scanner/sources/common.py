@@ -40,12 +40,14 @@ async def text_get(url: str, params: dict | None = None, headers: dict | None = 
         try:
             async with httpx.AsyncClient(timeout=30, follow_redirects=True, verify=False) as c:
                 resp = await c.get(url, params=params, headers=h)
-                if resp.status_code == 429:
-                    await asyncio.sleep(int(resp.headers.get("Retry-After", 5 * (attempt + 1))))
+                # 429/403 = rate-limited / WAF; back off and retry, then give up quietly.
+                if resp.status_code in (403, 429):
+                    if attempt < 3:
+                        await asyncio.sleep(int(resp.headers.get("Retry-After", 3 * (attempt + 1))))
                     continue
                 resp.raise_for_status()
                 return resp.text
-        except (httpx.TimeoutException, httpx.RemoteProtocolError, httpx.ConnectError):
+        except (httpx.TimeoutException, httpx.RemoteProtocolError, httpx.ConnectError, httpx.HTTPStatusError):
             if attempt < 3:
                 await asyncio.sleep(2 ** attempt)
     return ""
