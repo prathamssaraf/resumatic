@@ -33,12 +33,16 @@ async def json_get(url: str, params: dict | None = None, headers: dict | None = 
     return {}
 
 
-async def text_get(url: str, params: dict | None = None, headers: dict | None = None) -> str:
-    """Fetch a URL and return the raw response text (for HTML pages). '' on failure."""
+async def text_get(url: str, params: dict | None = None, headers: dict | None = None,
+                   proxy: str | None = None) -> str:
+    """Fetch a URL and return the raw response text (for HTML pages). '' on failure.
+    Optional `proxy` (e.g. socks5://127.0.0.1:9050) routes this request only."""
     h = {**_HEADERS, "Accept": "text/html,application/xhtml+xml", **(headers or {})}
+    timeout = 60 if proxy else 30  # proxied (Tor) requests are slower
     for attempt in range(4):
         try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True, verify=False) as c:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
+                                         verify=False, proxy=proxy) as c:
                 resp = await c.get(url, params=params, headers=h)
                 # 429/403 = rate-limited / WAF; back off and retry, then give up quietly.
                 if resp.status_code in (403, 429):

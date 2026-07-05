@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -25,6 +26,9 @@ from .common import text_get, parse_date
 
 BASE = "https://jobs.citi.com"
 RECENT_DAYS = 60  # "past 2 months"
+# Citi hard-blocks (403) our home IP after the backfill. Route Citi (only) through
+# a proxy if CITI_PROXY is set (e.g. socks5://127.0.0.1:9050 for local Tor).
+_PROXY = os.environ.get("CITI_PROXY") or None
 # Citi's WAF hard-blocks (403) bursty scraping. Stay polite: a real browser
 # header set, low concurrency, and per-cycle caps so the big backfill is spread
 # over many cycles instead of hammering the site in one shot.
@@ -100,7 +104,7 @@ def _parse_job(doc: str, href: str, cutoff: str) -> dict | None:
 
 async def _all_hrefs(concurrency: int) -> list[str]:
     """Enumerate every /job/ href across the full listing (pages fetched concurrently)."""
-    first = await text_get(f"{BASE}/search-jobs?p=1", headers=_UA)
+    first = await text_get(f"{BASE}/search-jobs?p=1", headers=_UA, proxy=_PROXY)
     if not first:
         return []
     m = re.search(r"([\d,]+)\s+Results", first)
@@ -113,7 +117,7 @@ async def _all_hrefs(concurrency: int) -> list[str]:
         if pg == 1:
             return _HREF.findall(first)
         async with sem:
-            doc = await text_get(f"{BASE}/search-jobs?p={pg}", headers=_UA)
+            doc = await text_get(f"{BASE}/search-jobs?p={pg}", headers=_UA, proxy=_PROXY)
             await asyncio.sleep(_REQ_DELAY)
         return _HREF.findall(doc)
 
@@ -146,7 +150,7 @@ async def scrape_citi(roles: list[str] | None = None, concurrency: int = 3) -> l
 
     async def _detail(href: str) -> dict | None:
         async with sem:
-            doc = await text_get(BASE + href, headers=_UA)
+            doc = await text_get(BASE + href, headers=_UA, proxy=_PROXY)
             await asyncio.sleep(_REQ_DELAY)
         return _parse_job(doc, href, cutoff) if doc else None
 
