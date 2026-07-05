@@ -25,6 +25,11 @@ from .common import text_get, parse_date
 
 BASE = "https://jobs.citi.com"
 RECENT_DAYS = 60  # "past 2 months"
+# Citi's WAF returns 403 to the default bot UA / high concurrency, so use a
+# real browser UA and modest parallelism.
+_UA = {"User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/125.0.0.0 Safari/537.36")}
 _US_COUNTRIES = {"united states", "united states of america", "usa", "us"}
 _LD = re.compile(r'type="application/ld\+json"[^>]*>(.*?)</script>', re.DOTALL)
 _HREF = re.compile(r'href="(/job/[^"]+)"')
@@ -88,7 +93,7 @@ def _parse_job(doc: str, href: str, cutoff: str) -> dict | None:
 
 async def _all_hrefs(concurrency: int) -> list[str]:
     """Enumerate every /job/ href across the full listing (pages fetched concurrently)."""
-    first = await text_get(f"{BASE}/search-jobs?p=1")
+    first = await text_get(f"{BASE}/search-jobs?p=1", headers=_UA)
     if not first:
         return []
     m = re.search(r"([\d,]+)\s+Results", first)
@@ -101,7 +106,7 @@ async def _all_hrefs(concurrency: int) -> list[str]:
         if pg == 1:
             return _HREF.findall(first)
         async with sem:
-            doc = await text_get(f"{BASE}/search-jobs?p={pg}")
+            doc = await text_get(f"{BASE}/search-jobs?p={pg}", headers=_UA)
         return _HREF.findall(doc)
 
     pages = await asyncio.gather(*[_page(pg) for pg in range(1, num_pages + 1)],
@@ -117,7 +122,7 @@ async def _all_hrefs(concurrency: int) -> list[str]:
     return out
 
 
-async def scrape_citi(roles: list[str] | None = None, concurrency: int = 12) -> list[dict]:
+async def scrape_citi(roles: list[str] | None = None, concurrency: int = 5) -> list[dict]:
     from job_scanner.store import existing_urls
     known = existing_urls()
 
@@ -131,7 +136,7 @@ async def scrape_citi(roles: list[str] | None = None, concurrency: int = 12) -> 
 
     async def _detail(href: str) -> dict | None:
         async with sem:
-            doc = await text_get(BASE + href)
+            doc = await text_get(BASE + href, headers=_UA)
         return _parse_job(doc, href, cutoff) if doc else None
 
     parsed = await asyncio.gather(*[_detail(h) for h in new], return_exceptions=True)
