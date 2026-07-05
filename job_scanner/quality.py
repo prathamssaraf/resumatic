@@ -51,22 +51,25 @@ CRITERIA: list[tuple[str, str]] = [
      "clearance, ITAR eligibility, or states that no sponsorship is available."),
 ]
 
-# Citi grad/analyst programs use a wider role gate: the candidate has a technical
-# degree and is open to software/tech roles, investment-banking / financial
-# analyst programs, and any early-career program that accepts a tech background.
-# Everything else (level, experience, location, sponsorship, full-time) is the
-# same as the global screen. Selected per-job in evaluate_job by platform.
-_CITI_ROLE_TYPE = (
-    "role_type",
-    "Could someone with a technical or computer-science degree apply to this role? "
-    "Answer yes for software / ML / data / engineering roles, technology analyst or "
-    "rotational programs, quantitative roles, AND investment banking or financial "
-    "analyst graduate/full-time analyst programs. Answer no only if it clearly "
-    "requires a non-technical specialization the candidate lacks (e.g., pure legal, "
-    "HR, clinical, or a licensed profession).",
-)
+# Citi has its OWN two-gate screen (per the user's rules), applied to every US
+# Citi posting from the last ~2 months. Only two things matter:
+#   1. the role requires at most 3 years of experience, and
+#   2. it is open to a technical BTech/MS degree (does NOT demand a specific other
+#      qualification such as an MBA or a finance/accounting/law degree).
+# All the global gates (full-time, role type, seniority, location, sponsorship)
+# are intentionally dropped for Citi. Selected per-job in evaluate_job by platform.
 CITI_CRITERIA: list[tuple[str, str]] = [
-    _CITI_ROLE_TYPE if key == "role_type" else (key, q) for key, q in CRITERIA
+    ("experience",
+     "Does this role require 3 or fewer years of professional experience? "
+     "Answer no only if it explicitly requires 4 or more years, or clearly targets "
+     "an experienced / senior professional."),
+    ("degree_open",
+     "Is this role open to a candidate whose degree is a Bachelor's (e.g. BTech) or "
+     "Master's (e.g. MS) in a computing, engineering, or technical field? Answer no "
+     "ONLY if the posting explicitly requires a specific different qualification the "
+     "candidate would not have — for example an MBA, a finance/accounting/economics "
+     "degree, a law degree, a medical/clinical license, or a specific professional "
+     "certification. If it accepts any degree or a technical degree, answer yes."),
 ]
 
 # Bound the JD sent to the model. Full JDs are stored in the DB, but sending a

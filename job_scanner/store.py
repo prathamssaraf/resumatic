@@ -128,13 +128,19 @@ def update_status(job_id: str, status: str) -> None:
     c.close()
 
 
-def expire_old_jobs(max_age_days: int = 7) -> int:
-    """Mark approved jobs older than max_age_days as 'skip' so the list stays fresh."""
+def expire_old_jobs(max_age_days: int = 7, citi_max_age_days: int = 60) -> int:
+    """Mark approved jobs older than their window as 'skip' so lists stay fresh.
+    Citi uses a longer 2-month window; everything else the default 7 days."""
     c = _conn()
     c.execute(
         "UPDATE jobs SET status='skip' WHERE status='approved' AND posted_date != '' "
         "AND platform != 'citi' AND posted_date < datetime('now', ?)",
         (f"-{max_age_days} days",)
+    )
+    c.execute(
+        "UPDATE jobs SET status='skip' WHERE status='approved' AND posted_date != '' "
+        "AND platform = 'citi' AND posted_date < datetime('now', ?)",
+        (f"-{citi_max_age_days} days",)
     )
     count = c.total_changes
     c.commit()

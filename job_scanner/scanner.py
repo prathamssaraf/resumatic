@@ -251,10 +251,11 @@ async def run_scan(
             all_raw.extend(await _guard(scrape_simplify(roles), "simplify"))
             progress.remove_task(task)
 
-        # Citi grad/analyst programs (US only; fetches per-job detail pages)
+        # Citi — every US posting from the last 2 months (fetches per-job detail
+        # pages; big first-cycle backfill, cheap after via URL dedup).
         if include_citi:
-            task = progress.add_task("Scanning Citi grad programs (US)...", total=None)
-            all_raw.extend(await _guard(scrape_citi(roles), "citi", timeout=120))
+            task = progress.add_task("Scanning Citi (US, last 2 months)...", total=None)
+            all_raw.extend(await _guard(scrape_citi(roles), "citi", timeout=900))
             progress.remove_task(task)
 
         # HN
@@ -290,13 +291,26 @@ async def run_scan(
     # UNIQUE url. Filtering only by id let title/company drift smuggle a job past
     # the gate, where it then bounced on the url constraint and got re-screened
     # every cycle forever (burning the whole LLM budget on uncommittable dupes).
-    # Citi grad/analyst programs bypass the 7-day recency gate (long-lived posts).
+    # Citi jobs bypass the 7-day recency gate (scrape_citi already applies its own
+    # 2-month window and tags non-US / stale ones with screen_skip_reason).
     candidates = [
         j for j in deduped
         if (is_recent(j.get("posted_date", "")) or j.get("platform") == "citi")
         and _job_id(j) not in known
         and j.get("url", "") not in known_urls
     ]
+
+    # Pre-screen skips: Citi postings already judged non-US / older than 2 months
+    # at scrape time. Save them as 'skip' (no LLM) so their URL is recorded once
+    # and never re-fetched — they are hidden from the dashboard's Rejected view.
+    prescreen_skips = [j for j in candidates if j.get("screen_skip_reason")]
+    candidates = [j for j in candidates if not j.get("screen_skip_reason")]
+    if prescreen_skips:
+        for j in prescreen_skips:
+            j["status"] = "skip"
+            j["score"] = 0
+            j["score_reason"] = j["screen_skip_reason"]
+        save_jobs(prescreen_skips)
 
     # ── LLM screen: each job is checked against every criterion, one call per ─
     # criterion, short-circuiting on the first failure. Jobs that pass all are
