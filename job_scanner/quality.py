@@ -32,11 +32,12 @@ CANDIDATE = (
 # unknown/unstated salary passes; only a clearly-below-$70k figure fails.
 _SALARY_CRITERION: tuple[str, str] = (
     "salary",
-    "Does this role pay at least $70,000 per year? Answer yes if it lists a salary "
-    "of $70,000/year or more, OR does not state any salary (unknown). Answer no "
-    "ONLY if it clearly pays less than $70,000/year — e.g. a stated salary or range "
-    "whose upper end is under $70k, or an hourly rate below about $34/hour for a "
-    "full-time role.",
+    "Does this role's pay START at $70,000 per year or more? Judge by the LOWER end "
+    "of any stated salary range. Answer no if the minimum (the lower number of a "
+    "range) is below $70,000/year — for example a range of $58,000-$81,000 FAILS "
+    "because it can pay as little as $58,000. Answer yes only if the lowest stated "
+    "annual pay is $70,000 or more, OR if no salary is stated at all (unknown). "
+    "Also answer no for an hourly rate below about $34/hour for a full-time role.",
 )
 
 CRITERIA: list[tuple[str, str]] = [
