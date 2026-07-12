@@ -166,6 +166,42 @@ DEFAULT_ATS: list[tuple[str, str]] = [
     ("ashby", "neon"),
     ("ashby", "pika"),
     ("lever", "veeva"),
+
+    # ── Batch 5: security, crypto/fintech, defense, data, more AI ──────────────
+    # Greenhouse
+    ("greenhouse", "ripple"),
+    ("greenhouse", "helsing"),
+    ("greenhouse", "newrelic"),
+    ("greenhouse", "fireblocks"),
+    ("greenhouse", "abnormalsecurity"),
+    ("greenhouse", "tanium"),
+    ("greenhouse", "huntress"),
+    ("greenhouse", "betterment"),
+    ("greenhouse", "life360"),
+    ("greenhouse", "vannevarlabs"),
+    ("greenhouse", "sumologic"),
+    ("greenhouse", "nextdoor"),
+    ("greenhouse", "starburst"),
+    ("greenhouse", "dremio"),
+    ("greenhouse", "imbue"),
+    # Ashby (AI model / media labs + infra)
+    ("ashby", "fireworksai"),
+    ("ashby", "lambda"),
+    ("ashby", "poolside"),
+    ("ashby", "reka"),
+    ("ashby", "sesame"),
+    ("ashby", "krea"),
+    ("ashby", "photoroom"),
+    ("ashby", "tavus"),
+    ("ashby", "ideogram"),
+    ("ashby", "hedra"),
+    ("ashby", "recraft"),
+    ("ashby", "viggle"),
+    ("ashby", "dust"),
+    ("ashby", "motherduck"),
+    ("ashby", "zed"),
+    # Lever
+    ("lever", "tala"),
 ]
 
 
