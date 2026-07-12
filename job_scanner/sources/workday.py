@@ -34,6 +34,20 @@ WORKDAY_SITES: list[tuple[str, str, str, str]] = [
     ("CrowdStrike", "crowdstrike.wd5.myworkdayjobs.com", "crowdstrike", "crowdstrikecareers"),
     ("Autodesk",    "autodesk.wd1.myworkdayjobs.com",    "autodesk",    "Ext"),
     ("Workday",     "workday.wd5.myworkdayjobs.com",     "workday",     "Workday"),
+    # Batch 2 — verified major employers
+    ("CVS Health",     "cvshealth.wd1.myworkdayjobs.com",       "cvshealth",      "CVS_Health_Careers"),
+    ("Micron",         "micron.wd1.myworkdayjobs.com",          "micron",         "External"),
+    ("Target",         "target.wd5.myworkdayjobs.com",          "target",         "TargetCareers"),
+    ("PNC",            "pnc.wd5.myworkdayjobs.com",             "pnc",            "External"),
+    ("T-Mobile",       "tmobile.wd1.myworkdayjobs.com",         "tmobile",        "External"),
+    ("Truist",         "truist.wd1.myworkdayjobs.com",          "truist",         "Careers"),
+    ("Comcast",        "comcast.wd5.myworkdayjobs.com",         "comcast",        "Comcast_Careers"),
+    ("General Motors", "generalmotors.wd5.myworkdayjobs.com",   "generalmotors",  "Careers_GM"),
+    ("HP",             "hp.wd5.myworkdayjobs.com",              "hp",             "ExternalCareerSite"),
+    ("Intel",          "intel.wd1.myworkdayjobs.com",           "intel",          "External"),
+    ("AIG",            "aig.wd1.myworkdayjobs.com",             "aig",            "AIG"),
+    ("BlackRock",      "blackrock.wd1.myworkdayjobs.com",       "blackrock",      "BlackRock_Professional"),
+    ("Zillow",         "zillow.wd5.myworkdayjobs.com",          "zillow",         "Zillow_Group_External"),
 ]
 
 _UA = {"User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
