@@ -202,6 +202,19 @@ DEFAULT_ATS: list[tuple[str, str]] = [
     ("ashby", "zed"),
     # Lever
     ("lever", "tala"),
+
+    # ── Batch 6: major high-volume employers ──────────────────────────────────
+    ("greenhouse", "zscaler"),
+    ("greenhouse", "purestorage"),
+    ("greenhouse", "lucidmotors"),
+    ("greenhouse", "braze"),
+    ("greenhouse", "klaviyo"),
+    ("greenhouse", "riotgames"),
+    ("greenhouse", "rubrik"),
+    ("greenhouse", "fastly"),
+    ("greenhouse", "instabase"),
+    ("ashby", "saronic"),
+    ("ashby", "flock"),
 ]
 
 
