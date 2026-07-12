@@ -16,6 +16,7 @@ from .sources.aggregators import (
 from .sources.hn import scrape_hn_hiring, scrape_hn_search
 from .sources.simplify import scrape_simplify
 from .sources.citi import scrape_citi
+from .sources.workday import scrape_workday
 from .quality import evaluate_job, CRITERIA
 from .store import save_jobs, list_jobs, stats
 
@@ -256,6 +257,7 @@ async def run_scan(
     include_hn: bool = True,
     include_simplify: bool = True,
     include_citi: bool = True,
+    include_workday: bool = True,
     max_concurrent: int = 3,
 ) -> dict:
     watchlist = ats_watchlist if ats_watchlist is not None else DEFAULT_ATS
@@ -307,6 +309,12 @@ async def run_scan(
             all_raw.extend(await _guard(scrape_citi(roles), "citi", timeout=900))
             progress.remove_task(task)
 
+        # Workday — major employers (NVIDIA, Salesforce, Wells Fargo, …) via CXS API
+        if include_workday:
+            task = progress.add_task("Scanning Workday employers...", total=None)
+            all_raw.extend(await _guard(scrape_workday(roles), "workday", timeout=300))
+            progress.remove_task(task)
+
         # HN
         if include_hn:
             task = progress.add_task("Scanning HN Who's Hiring...", total=None)
@@ -340,11 +348,11 @@ async def run_scan(
     # UNIQUE url. Filtering only by id let title/company drift smuggle a job past
     # the gate, where it then bounced on the url constraint and got re-screened
     # every cycle forever (burning the whole LLM budget on uncommittable dupes).
-    # Citi jobs bypass the 7-day recency gate (scrape_citi already applies its own
-    # 2-month window and tags non-US / stale ones with screen_skip_reason).
+    # Citi/Workday apply their own recency + US filtering in the scraper and tag
+    # non-US/stale ones with screen_skip_reason, so exempt them from the 7-day gate.
     candidates = [
         j for j in deduped
-        if (is_recent(j.get("posted_date", "")) or j.get("platform") == "citi")
+        if (is_recent(j.get("posted_date", "")) or j.get("platform") in ("citi", "workday"))
         and _job_id(j) not in known
         and j.get("url", "") not in known_urls
     ]
