@@ -28,6 +28,45 @@ def cmd_scan(args: argparse.Namespace) -> None:
     print_results(result)
 
 
+def cmd_meta(args: argparse.Namespace) -> None:
+    """On-demand browser-driven pull of Meta (metacareers.com) jobs."""
+    from job_scanner.sources.meta import scrape_meta
+    from job_scanner.quality import evaluate_job
+    from job_scanner.store import save_jobs
+    from rich.console import Console
+    console = Console()
+
+    async def run():
+        console.print("[cyan]Launching browser to pull Meta jobs…[/cyan]")
+        jobs = await scrape_meta(max_detail=args.max, headless=not args.show)
+        console.print(f"  Pulled [cyan]{len(jobs)}[/cyan] new US technical Meta jobs. Screening…")
+        loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(3)
+        approved = 0
+
+        async def screen(job):
+            nonlocal approved
+            async with sem:
+                try:
+                    v = await loop.run_in_executor(None, evaluate_job, job)
+                except Exception as e:
+                    console.print(f"  [dim]✗ {job['title'][:40]} — {str(e)[:40]}[/dim]")
+                    return
+            job["score"] = v["score"]; job["score_reason"] = v["reason"]
+            job["status"] = "approved" if v["approved"] else "rejected"
+            await loop.run_in_executor(None, save_jobs, [job])
+            if v["approved"]:
+                approved += 1
+                console.print(f"  [green]✓ APPROVED[/green] {job['title'][:44]} [dim](fit {v['score']})[/dim]")
+            else:
+                console.print(f"  [dim]· rejected {job['title'][:44]} [{v['failed']}][/dim]")
+
+        await asyncio.gather(*[screen(j) for j in jobs])
+        console.print(f"\n[bold]Meta pull complete[/bold] — {approved} approved, {len(jobs)-approved} rejected. See the dashboard.")
+
+    asyncio.run(run())
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     from job_scanner.scanner import print_job_list
     print_job_list(status=args.status)
@@ -57,6 +96,12 @@ def main() -> None:
     scan_p.add_argument("--no-citi", action="store_true", help="Skip Citi grad programs")
     scan_p.add_argument("--no-workday", action="store_true", help="Skip Workday employers")
     scan_p.set_defaults(func=cmd_scan)
+
+    # meta (browser-driven, on-demand)
+    meta_p = sub.add_parser("meta", help="Browser-driven pull of Meta (metacareers.com) jobs")
+    meta_p.add_argument("--max", type=int, default=120, help="Max job detail pages to fetch")
+    meta_p.add_argument("--show", action="store_true", help="Show the browser window (non-headless)")
+    meta_p.set_defaults(func=cmd_meta)
 
     # list
     list_p = sub.add_parser("list", help="List saved jobs")
