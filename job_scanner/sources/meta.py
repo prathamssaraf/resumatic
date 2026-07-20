@@ -69,9 +69,16 @@ async def scrape_meta(max_detail: int = 150, headless: bool = True) -> list[dict
                     pass
         page.on("response", _grab)
 
-        await page.goto(SEARCH_URL, wait_until="networkidle", timeout=60000)
-        if not all_jobs_body:
-            await page.wait_for_timeout(3000)
+        # networkidle never fires on Meta (persistent long-poll connections), so
+        # load, then poll for the intercepted jobs response instead of waiting.
+        try:
+            await page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=45000)
+        except Exception:
+            pass
+        for _ in range(30):
+            if all_jobs_body:
+                break
+            await page.wait_for_timeout(1000)
 
         listing = []
         if all_jobs_body:
