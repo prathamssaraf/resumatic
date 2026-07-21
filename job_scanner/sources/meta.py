@@ -7,8 +7,10 @@ Meta's own JavaScript fetch the jobs, and intercept the GraphQL response. The
 job list (job_search_with_featured_jobs_v2.all_jobs) has title/locations/teams
 but no description, so we read each job's detail page for the JD text.
 
-This needs a browser, so it is NOT part of the headless daemon — it runs on
-demand via `uv run python main.py meta`.
+This needs a real (headless) browser, so it's heavier than the other sources,
+but it's wired into the normal 20-min daemon loop like everything else — capped
+per cycle (max_detail) and guarded with a timeout so a hang can't stall the
+whole scan. Can still be run standalone via `uv run python main.py meta`.
 """
 from __future__ import annotations
 import asyncio

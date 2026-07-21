@@ -20,6 +20,7 @@ from .sources.workday import scrape_workday
 from .sources.amazon import scrape_amazon
 from .sources.netflix import scrape_netflix
 from .sources.google import scrape_google
+from .sources.meta import scrape_meta
 from .quality import evaluate_job, CRITERIA
 from .store import save_jobs, list_jobs, stats
 
@@ -262,6 +263,7 @@ async def run_scan(
     include_citi: bool = True,
     include_workday: bool = True,
     include_bigtech: bool = True,
+    include_meta: bool = True,
     max_concurrent: int = 3,
 ) -> dict:
     watchlist = ats_watchlist if ats_watchlist is not None else DEFAULT_ATS
@@ -332,6 +334,13 @@ async def run_scan(
             for r in bigtech_results:
                 if isinstance(r, list):
                     all_raw.extend(r)
+            progress.remove_task(task)
+
+        # Meta — browser-driven (Playwright), capped per cycle so a 20-min scan
+        # keeps moving; URL dedup means each cycle just picks up new postings.
+        if include_meta:
+            task = progress.add_task("Scanning Meta (browser)...", total=None)
+            all_raw.extend(await _guard(scrape_meta(max_detail=40), "meta", timeout=600))
             progress.remove_task(task)
 
         # HN

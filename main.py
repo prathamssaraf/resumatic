@@ -25,6 +25,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
         include_citi=not args.no_citi,
         include_workday=not args.no_workday,
         include_bigtech=not args.no_bigtech,
+        include_meta=not args.no_meta,
     ))
     print_results(result)
 
@@ -97,6 +98,7 @@ def main() -> None:
     scan_p.add_argument("--no-citi", action="store_true", help="Skip Citi grad programs")
     scan_p.add_argument("--no-workday", action="store_true", help="Skip Workday employers")
     scan_p.add_argument("--no-bigtech", action="store_true", help="Skip Amazon/Netflix/Google")
+    scan_p.add_argument("--no-meta", action="store_true", help="Skip Meta (browser-driven)")
     scan_p.set_defaults(func=cmd_scan)
 
     # meta (browser-driven, on-demand)
