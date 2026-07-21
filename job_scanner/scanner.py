@@ -17,6 +17,9 @@ from .sources.hn import scrape_hn_hiring, scrape_hn_search
 from .sources.simplify import scrape_simplify
 from .sources.citi import scrape_citi
 from .sources.workday import scrape_workday
+from .sources.amazon import scrape_amazon
+from .sources.netflix import scrape_netflix
+from .sources.google import scrape_google
 from .quality import evaluate_job, CRITERIA
 from .store import save_jobs, list_jobs, stats
 
@@ -258,6 +261,7 @@ async def run_scan(
     include_simplify: bool = True,
     include_citi: bool = True,
     include_workday: bool = True,
+    include_bigtech: bool = True,
     max_concurrent: int = 3,
 ) -> dict:
     watchlist = ats_watchlist if ats_watchlist is not None else DEFAULT_ATS
@@ -313,6 +317,21 @@ async def run_scan(
         if include_workday:
             task = progress.add_task("Scanning Workday employers...", total=None)
             all_raw.extend(await _guard(scrape_workday(roles), "workday", timeout=300))
+            progress.remove_task(task)
+
+        # Big tech with plain-HTTP job APIs (no browser needed) — Amazon, Netflix,
+        # Google. (Meta needs a real browser and runs separately via `main.py meta`.)
+        if include_bigtech:
+            task = progress.add_task("Scanning Amazon, Netflix, Google...", total=None)
+            bigtech_results = await asyncio.gather(
+                _guard(scrape_amazon(roles), "amazon", timeout=300),
+                _guard(scrape_netflix(roles), "netflix", timeout=180),
+                _guard(scrape_google(roles), "google", timeout=180),
+                return_exceptions=True,
+            )
+            for r in bigtech_results:
+                if isinstance(r, list):
+                    all_raw.extend(r)
             progress.remove_task(task)
 
         # HN
