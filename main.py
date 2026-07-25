@@ -69,6 +69,22 @@ def cmd_meta(args: argparse.Namespace) -> None:
     asyncio.run(run())
 
 
+def cmd_xr_scan(args: argparse.Namespace) -> None:
+    """Standalone Google XR/AR/VR tracker scan — separate table, no LLM, no daemon."""
+    from job_scanner.sources.google_xr import scrape_google_xr
+    from job_scanner.xr_store import save_xr_jobs
+    from rich.console import Console
+    console = Console()
+
+    async def run():
+        console.print("[cyan]Scanning Google for XR/AR/VR roles (non-senior, US-only)…[/cyan]")
+        jobs = await scrape_google_xr()
+        ins, dup = save_xr_jobs(jobs)
+        console.print(f"[bold]Done[/bold] — {len(jobs)} found, {ins} new, {dup} already tracked. See the dashboard's Google XR tab.")
+
+    asyncio.run(run())
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     from job_scanner.scanner import print_job_list
     print_job_list(status=args.status)
@@ -106,6 +122,10 @@ def main() -> None:
     meta_p.add_argument("--max", type=int, default=120, help="Max job detail pages to fetch")
     meta_p.add_argument("--show", action="store_true", help="Show the browser window (non-headless)")
     meta_p.set_defaults(func=cmd_meta)
+
+    # xr-scan (standalone, separate table, no LLM/daemon involvement)
+    xr_p = sub.add_parser("xr-scan", help="Scan Google for XR/AR/VR roles (non-senior, US-only)")
+    xr_p.set_defaults(func=cmd_xr_scan)
 
     # list
     list_p = sub.add_parser("list", help="List saved jobs")

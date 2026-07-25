@@ -3,13 +3,19 @@ Dashboard for jobs-auto-scanner (scan-only).
 Run: uv run python main.py dashboard  →  http://localhost:8765
 """
 from __future__ import annotations
-import json, os, signal, subprocess, time
+import json, os, signal, subprocess, threading, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
 import config
 from job_scanner.store import list_jobs, stats, update_status
+from job_scanner.xr_store import list_xr_jobs, xr_stats
+
+# ── Google XR tracker state (completely separate feature — own table, own
+# scraper, no LLM, no daemon involvement; a scan only runs when triggered from
+# this tab's Refresh button, in a background thread) ───────────────────────────
+_xr_scanning = False
 
 PORT       = 8765
 _PID_FILE  = Path("data/daemon.pid")
@@ -57,9 +63,66 @@ def _scraper_stop() -> bool:
         return False
 
 
+# ── Google XR tracker: background scan trigger ─────────────────────────────────
+def _xr_scan_start() -> bool:
+    """Fire the standalone XR scraper in a background thread. Never touches the
+    main `jobs` table, the LLM, or the daemon — fully isolated side effect."""
+    global _xr_scanning
+    if _xr_scanning:
+        return False
+    _xr_scanning = True
+
+    def _run():
+        global _xr_scanning
+        try:
+            import asyncio as _asyncio
+            from job_scanner.sources.google_xr import scrape_google_xr
+            from job_scanner.xr_store import save_xr_jobs
+            jobs = _asyncio.run(scrape_google_xr())
+            save_xr_jobs(jobs)
+        except Exception:
+            pass
+        finally:
+            _xr_scanning = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
+
+
 # ── HTML helpers ──────────────────────────────────────────────────────────────
 def _esc(s: str) -> str:
     return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+
+
+def _xr_grid(jobs: list[dict]) -> str:
+    """Independent grid renderer for the Google XR tab — deliberately NOT
+    reusing _jobs_grid, since that one is wired to the main `jobs` table's
+    score/status/mark-applied logic. Same visual language (.dg/.dgr CSS), own
+    columns: title/company, location, posted date, link."""
+    if not jobs:
+        return '<div class="empty">No XR roles tracked yet &mdash; hit Scan Now.</div>'
+    rows = []
+    for j in jobs:
+        title = _esc(j.get("title", "")); loc = _esc(j.get("location", ""))
+        dt = (j.get("posted_date") or "")[:10] or "—"
+        url = _esc(j.get("url", ""))
+        apply = f'<a href="{url}" target="_blank" class="apla">View &#x2197;</a>' if url else ""
+        rows.append(
+            f'<div class="dgr" data-date="{_esc(j.get("posted_date","") or "")}">'
+            f'<div class="gc"><div class="jt" title="{title}">{title}</div><div class="jco">Google</div></div>'
+            f'<div class="gc"><span class="jpl">{loc}</span></div>'
+            f'<div class="gc"><span class="jdt">{dt}</span></div>'
+            f'<div class="gc">{apply}</div>'
+            f'</div>'
+        )
+    hdr = (
+        '<div class="dgh" style="grid-template-columns:minmax(220px,1fr) minmax(160px,.9fr) 92px 80px">'
+        '<span>Role</span><span>Location</span><span>Posted</span><span></span></div>'
+    )
+    rows_html = "".join(rows).replace(
+        'class="dgr"', 'class="dgr" style="grid-template-columns:minmax(220px,1fr) minmax(160px,.9fr) 92px 80px"'
+    )
+    return f'<div class="dg" id="xr-grid">{hdr}{rows_html}</div>'
 
 
 
@@ -354,6 +417,23 @@ function ctlScraper(action) {
   fetch('/api/scraper/' + action, {method:'POST'}).then(function(){ setTimeout(pollOverview, 400); });
 }
 
+// ── Google XR tracker (fully independent of the main scanner) ─────────────────
+function ctlXrScan() {
+  var btn = document.getElementById('xr-scan-btn');
+  var lbl = document.getElementById('xr-lbl');
+  var dot = document.getElementById('xr-dot');
+  if (btn) { btn.disabled = true; }
+  if (lbl) { lbl.textContent = 'Scanning…'; lbl.className = 'sctrl-status off'; }
+  if (dot) { dot.className = 'dot dot-am'; }
+  fetch('/api/xr/scan', {method:'POST'}).then(function(){
+    var poll = setInterval(function(){
+      fetch('/api/xr/status').then(function(r){return r.json();}).then(function(d){
+        if (!d.scanning) { clearInterval(poll); window.location.reload(); }
+      }).catch(function(){});
+    }, 3000);
+  });
+}
+
 // ── Sections collapse ─────────────────────────────────────────────────────────
 document.querySelectorAll('.sech').forEach(function(hdr) {
   var body = hdr.nextElementSibling;
@@ -607,6 +687,39 @@ def _render_page() -> str:
         or '<div class="empty">No rejected jobs yet.</div>'
     )
 
+    # ── Google XR tracker — fully separate feature: own table (xr_jobs), own
+    # scraper, no LLM screening, no daemon involvement. Only 3 deterministic
+    # checks: non-senior title, US-based, XR/AR/VR related. Scan is manual
+    # (Scan Now button) so it never runs unprompted or touches the main flow.
+    xr_jobs_list = list_xr_jobs()
+    xr_s = xr_stats()
+    xr_sort_bar = (
+        '<div class="sortbar">'
+        '<input class="search-box" id="xr-search" type="search" '
+        'placeholder="Search title, location…" '
+        'oninput="filterGrid(\'xr-grid\', this.value)">'
+        '<span class="search-count" id="xr-search-count"></span>'
+        '<span class="sortbar-l">Sort by</span>'
+        '<button class="sort-btn" data-key="date" onclick="sortGrid(\'xr-grid\',\'date\')">Date</button>'
+        '</div>'
+    )
+    xr_tab = (
+        f'<div class="card" style="margin-bottom:14px">'
+        f'<div class="card-ey">Google XR / AR / VR Tracker</div>'
+        f'<div class="card-t">Independent Tracker</div>'
+        f'<div class="card-sub">Non-senior &middot; US-based &middot; XR/AR/VR only &mdash; separate from the main scan, no LLM screening. '
+        f'Last scan: {_esc(xr_s["last_scan"] or "never")}</div>'
+        f'<div class="sctrl">'
+        f'<span class="dot {"dot-am" if _xr_scanning else "dot-muted"}" id="xr-dot"></span>'
+        f'<span class="sctrl-label">{xr_s["total"]} roles tracked</span>'
+        f'<span class="sctrl-status {"off" if _xr_scanning else "on"}" id="xr-lbl">{"Scanning…" if _xr_scanning else "Idle"}</span>'
+        f'<button class="ctl-btn primary" id="xr-scan-btn" onclick="ctlXrScan()" {"disabled" if _xr_scanning else ""}>Scan Now</button>'
+        f'</div>'
+        f'</div>'
+        + xr_sort_bar
+        + _xr_grid(xr_jobs_list)
+    )
+
     from job_scanner.quality import CRITERIA
     _n_criteria = len(CRITERIA)
     scraper_on = _scraper_running()
@@ -661,11 +774,13 @@ def _render_page() -> str:
         f'      <button class="tab active" data-tab="overview" onclick="switchTab(\'overview\')">Overview</button>\n'
         f'      <button class="tab" data-tab="approved" onclick="switchTab(\'approved\')">Approved ({apc})</button>\n'
         f'      <button class="tab" data-tab="rejected" onclick="switchTab(\'rejected\')">Rejected ({rc})</button>\n'
+        f'      <button class="tab" data-tab="xr" onclick="switchTab(\'xr\')">Google XR ({xr_s["total"]})</button>\n'
         f'    </nav>\n'
 
         f'    <div class="tabp active" id="tab-overview">{overview_tab}</div>\n'
         f'    <div class="tabp" id="tab-approved">{approved_tab}</div>\n'
         f'    <div class="tabp" id="tab-rejected">{rejected_tab}</div>\n'
+        f'    <div class="tabp" id="tab-xr">{xr_tab}</div>\n'
 
         f'    <footer class="footer">\n'
         f'      <span>Jobs Auto Scanner</span>\n'
@@ -714,6 +829,9 @@ class _Handler(BaseHTTPRequestHandler):
                 "rejected_count": by_status.get("rejected", 0) + by_status.get("skip", 0) + by_status.get("error", 0),
             }); return
 
+        if p.path == "/api/xr/status":
+            self._json({"scanning": _xr_scanning}); return
+
         self.send_response(404); self.end_headers()
 
     def do_POST(self):
@@ -733,6 +851,9 @@ class _Handler(BaseHTTPRequestHandler):
                 update_status(jid, "applied")
                 self._json({"ok": True}); return
             self._json({"ok": False}, 400); return
+
+        if p == "/api/xr/scan":
+            self._json({"ok": _xr_scan_start()}); return
 
         self.send_response(404); self.end_headers()
 
