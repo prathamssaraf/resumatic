@@ -18,9 +18,13 @@ from rich.rule import Rule
 import config
 from job_scanner.scanner import run_scan
 from job_scanner.store import stats, expire_old_jobs
+from job_scanner.sources.google_xr import scrape_google_xr
+from job_scanner.xr_store import save_xr_jobs, xr_stats
 
 
 console = Console()
+
+XR_SCAN_INTERVAL_SECONDS = 30 * 60  # Google XR tracker: independent 30-min cadence
 
 
 # ── Scan loop ─────────────────────────────────────────────────────────────────
@@ -55,6 +59,26 @@ async def _scan_loop(scan_interval: int) -> None:
         await asyncio.sleep(scan_interval)
 
 
+# ── Google XR tracker loop (independent — own table, no LLM, never touches ────
+# the main `jobs` table or the scan loop above; runs concurrently on its own
+# 30-min cadence via asyncio.gather in run_daemon()).
+
+async def _xr_loop(scan_interval: int) -> None:
+    cycle = 1
+    while True:
+        try:
+            jobs = await scrape_google_xr()
+            ins, dup = await asyncio.get_running_loop().run_in_executor(None, save_xr_jobs, jobs)
+            console.print(
+                f"  [dim]Google XR tracker[/dim] cycle {cycle}: {len(jobs)} found, "
+                f"[cyan]{ins} new[/cyan], {dup} already tracked"
+            )
+        except Exception as e:
+            console.print(f"  [dim]Google XR tracker error:[/dim] {e}")
+        cycle += 1
+        await asyncio.sleep(scan_interval)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 async def run_daemon() -> None:
@@ -76,4 +100,14 @@ async def run_daemon() -> None:
     s = stats()
     console.print(f"  DB: {s['total']} jobs  {s['by_status']}\n")
 
-    await _scan_loop(config.SCAN_INTERVAL_SECONDS)
+    xr_s = xr_stats()
+    console.print(f"  Google XR tracker : every {XR_SCAN_INTERVAL_SECONDS // 60} min "
+                  f"(independent, non-senior + US + XR/AR/VR only, no LLM) — "
+                  f"{xr_s['total']} tracked so far\n")
+
+    # Two fully independent loops: the main LLM-screened scan, and the
+    # deterministic Google XR tracker. They share nothing except the process.
+    await asyncio.gather(
+        _scan_loop(config.SCAN_INTERVAL_SECONDS),
+        _xr_loop(XR_SCAN_INTERVAL_SECONDS),
+    )
