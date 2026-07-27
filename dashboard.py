@@ -524,7 +524,16 @@ function _applySort(gridId, key, dir) {
     if (va > vb) return dir === 'asc' ?  1 : -1;
     return 0;
   });
-  rows.forEach(function(r){ grid.appendChild(r); });
+  rows.forEach(function(r){
+    grid.appendChild(r);
+    // appendChild re-inserts the row, which can leave its one-shot 'row-in'
+    // fade-in animation (opacity 0 -> 1, fill-mode both) stuck at the STARTING
+    // keyframe (opacity:0) instead of replaying or holding at the end state —
+    // rows then render as fully invisible even though they're in the DOM.
+    // Strip the animation and force full opacity so a re-sort can never hide rows.
+    r.style.animation = 'none';
+    r.style.opacity = '1';
+  });
   document.querySelectorAll('.sort-btn').forEach(function(btn) {
     var active = btn.dataset.key === key;
     btn.classList.toggle('active', active);
