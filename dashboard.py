@@ -533,14 +533,16 @@ function _applySort(gridId, key, dir) {
   });
 }
 function sortGrid(gridId, key) {
+  var storeKey = 'sort:' + gridId;
   var saved = {};
-  try { saved = JSON.parse(localStorage.getItem('approvedSort') || '{}'); } catch(e) {}
+  try { saved = JSON.parse(localStorage.getItem(storeKey) || '{}'); } catch(e) {}
   var dir = (saved.key === key && saved.dir === 'desc') ? 'asc' : 'desc';
   _applySort(gridId, key, dir);
-  try { localStorage.setItem('approvedSort', JSON.stringify({grid: gridId, key: key, dir: dir})); } catch(e) {}
+  try { localStorage.setItem(storeKey, JSON.stringify({key: key, dir: dir})); } catch(e) {}
 }
 
-// ── Approved-grid search (client-side, persisted) ─────────────────────────────
+// ── Per-grid search (client-side, persisted, namespaced by gridId so the
+// Approved tab and the Google XR tab never share state) ──────────────────────
 function filterGrid(gridId, query) {
   var grid = document.getElementById(gridId);
   if (!grid) return;
@@ -552,24 +554,26 @@ function filterGrid(gridId, query) {
     row.style.display = hit ? '' : 'none';
     if (hit) shown++;
   });
-  var lbl = document.getElementById('approved-search-count');
+  var lbl = document.getElementById(gridId.replace('-grid','') + '-search-count');
   if (lbl) lbl.textContent = q ? (shown + ' / ' + total + ' match') : '';
-  try { localStorage.setItem('approvedSearch', query || ''); } catch(e) {}
+  try { localStorage.setItem('search:' + gridId, query || ''); } catch(e) {}
 }
-(function() {
+function _restoreGridState(gridId, searchInputId, defaultKey, defaultDir) {
+  var grid = document.getElementById(gridId);
+  if (!grid) return;
   var q = '';
-  try { q = localStorage.getItem('approvedSearch') || ''; } catch(e) {}
-  if (!q) return;
-  var box = document.getElementById('approved-search');
-  if (box) { box.value = q; filterGrid('approved-grid', q); }
-})();
-(function() {
-  // Re-apply the saved sort on every load (the page fully refreshes each 20s).
+  try { q = localStorage.getItem('search:' + gridId) || ''; } catch(e) {}
+  if (q) {
+    var box = document.getElementById(searchInputId);
+    if (box) { box.value = q; filterGrid(gridId, q); }
+  }
   var saved = null;
-  try { saved = JSON.parse(localStorage.getItem('approvedSort') || 'null'); } catch(e) {}
-  if (!saved) saved = {grid: 'approved-grid', key: 'date', dir: 'desc'};
-  if (document.getElementById(saved.grid)) _applySort(saved.grid, saved.key, saved.dir);
-})();
+  try { saved = JSON.parse(localStorage.getItem('sort:' + gridId) || 'null'); } catch(e) {}
+  if (!saved) saved = {key: defaultKey, dir: defaultDir};
+  _applySort(gridId, saved.key, saved.dir);
+}
+_restoreGridState('approved-grid', 'approved-search', 'date', 'desc');
+_restoreGridState('xr-grid', 'xr-search', 'date', 'desc');
 """
 
 
