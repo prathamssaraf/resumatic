@@ -33,7 +33,18 @@ _QUERIES = ["XR", "Augmented Reality", "Virtual Reality"]
 _SENIOR_RE = re.compile(
     r"(?<!\w)(senior|sr\.?|staff|principal|distinguished|director|"
     r"vp|vice president|head of|manager|lead)(?!\w)", re.I)
-_MAX_PAGES_PER_QUERY = 6      # ~120 listings/query enumerated
+# Google's search is fuzzy — querying "Augmented Reality"/"Virtual Reality" also
+# surfaces plenty of unrelated roles (Forward Deployed Engineer, Silicon
+# Validation, Network Ops, Android Trust…) that just loosely matched somewhere
+# in the JD. Require the TITLE to actually name the topic before spending a
+# detail fetch on it — matches the pattern every genuine XR posting we've seen
+# so far actually uses (e.g. "Software Engineer III, Mobile, iOS, XR").
+_TOPIC_RE = re.compile(
+    r"\bxr\b|\bar\s?/\s?vr\b|augmented reality|virtual reality|"
+    r"reality labs|mixed reality|spatial computing", re.I)
+_MAX_PAGES_PER_QUERY = 8      # ~160 listings/query enumerated (raised: topic
+                              # filter now skips irrelevant hits before fetching,
+                              # so more pages can be scanned for the same cost)
 _MAX_DETAIL = 150             # cap detail fetches per run
 
 
@@ -76,12 +87,13 @@ def _parse_detail(doc: str) -> dict | None:
 
 
 async def scrape_google_xr() -> list[dict]:
-    """Independent XR/AR/VR scan: non-senior + US-only. Returns newest-first."""
+    """Independent XR/AR/VR scan: on-topic + non-senior + US-only. Newest-first."""
     from job_scanner.xr_store import existing_xr_urls
     known = existing_xr_urls()
 
     seen_ids: set[str] = set()
     candidates: list[str] = []
+    off_topic_skipped = 0
     for q in _QUERIES:
         for pg in range(1, _MAX_PAGES_PER_QUERY + 1):
             items = await _list_page(q, pg)
@@ -94,6 +106,9 @@ async def scrape_google_xr() -> list[dict]:
                     continue
                 seen_ids.add(jid)
                 new_this_page += 1
+                if not _TOPIC_RE.search(title):
+                    off_topic_skipped += 1
+                    continue  # cheapest filter first: title doesn't even name XR/AR/VR
                 if _SENIOR_RE.search(title):
                     continue  # cheap pre-filter before spending a detail fetch
                 url = BASE + href
