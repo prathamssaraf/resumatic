@@ -4,7 +4,6 @@ Simple — no vector DB, no embeddings.
 """
 from __future__ import annotations
 import sqlite3
-import json
 import hashlib
 from pathlib import Path
 
@@ -13,8 +12,14 @@ DB_PATH = Path(__file__).parent.parent / "data" / "jobs.db"
 
 def _conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB_PATH)
+    c = sqlite3.connect(DB_PATH, timeout=30)
     c.row_factory = sqlite3.Row
+    # WAL lets the dashboard (reader) and the daemon's several concurrent async
+    # loops (writers) hit this file at once without "database is locked" —
+    # readers no longer block behind a writer's transaction. busy_timeout backs
+    # that up: real writer-vs-writer contention retries instead of erroring.
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA busy_timeout=30000")
     c.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             id TEXT PRIMARY KEY,
@@ -29,15 +34,50 @@ def _conn() -> sqlite3.Connection:
             score INTEGER,
             score_reason TEXT,
             status TEXT DEFAULT 'new',
-            created_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT (datetime('now')),
+            resume_path TEXT DEFAULT '',
+            cover_path TEXT DEFAULT ''
         )
     """)
+    # Migrate existing DBs that don't have the new columns
+    for col in ("resume_path", "cover_path"):
+        try:
+            c.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT DEFAULT ''")
+        except Exception:
+            pass
     c.commit()
     return c
 
 
-def _job_id(job: dict) -> str:
-    return hashlib.md5(job.get("url", job.get("title", "")).encode()).hexdigest()[:16]
+def job_id(job: dict) -> str:
+    # Deduplicate on (company + title) so the same role from different sources
+    # (e.g. Simplify + direct ATS) doesn't get saved twice.
+    company = (job.get("company") or "").strip().lower()
+    title   = (job.get("title")   or "").strip().lower()
+    key = f"{company}|{title}" if (company and title) else job.get("url", job.get("title", ""))
+    return hashlib.md5(key.encode()).hexdigest()[:16]
+
+
+# Backwards-compatible alias
+_job_id = job_id
+
+
+def existing_job_ids() -> set[str]:
+    """All job IDs already in the DB — used to skip re-processing known jobs."""
+    c = _conn()
+    rows = c.execute("SELECT id FROM jobs").fetchall()
+    c.close()
+    return {r[0] for r in rows}
+
+
+def existing_urls() -> set[str]:
+    """All job URLs already in the DB. The table has a UNIQUE(url) constraint, so a
+    job whose URL is already stored can never be inserted (it bounces as a dup) —
+    must be excluded from the candidate set or it gets re-screened every cycle."""
+    c = _conn()
+    rows = c.execute("SELECT url FROM jobs WHERE url != ''").fetchall()
+    c.close()
+    return {r[0] for r in rows}
 
 
 def save_jobs(jobs: list[dict]) -> tuple[int, int]:
@@ -49,13 +89,13 @@ def save_jobs(jobs: list[dict]) -> tuple[int, int]:
         try:
             c.execute("""
                 INSERT INTO jobs (id, title, company, url, platform, description,
-                                  location, salary, posted_date, score, score_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  location, salary, posted_date, score, score_reason, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 jid, j.get("title", ""), j.get("company", ""), j.get("url", ""),
                 j.get("platform", ""), j.get("description", ""), j.get("location", ""),
                 j.get("salary", ""), j.get("posted_date", ""),
-                j.get("score", 0), j.get("score_reason", ""),
+                j.get("score", 0), j.get("score_reason", ""), j.get("status", "new"),
             ))
             inserted += 1
         except sqlite3.IntegrityError:
@@ -94,20 +134,24 @@ def update_status(job_id: str, status: str) -> None:
     c.close()
 
 
-def prune_to_top_n(n: int) -> int:
-    """Keep only the top N jobs (newest + highest score). Returns number deleted."""
+def expire_old_jobs(max_age_days: int = 7, citi_max_age_days: int = 60) -> int:
+    """Mark approved jobs older than their window as 'skip' so lists stay fresh.
+    Citi uses a longer 2-month window; everything else the default 7 days."""
     c = _conn()
-    rows = c.execute(
-        "SELECT id FROM jobs ORDER BY posted_date DESC, score DESC, created_at DESC"
-    ).fetchall()
-    keep_ids = {r[0] for r in rows[:n]}
-    all_ids  = {r[0] for r in rows}
-    to_delete = all_ids - keep_ids
-    if to_delete:
-        c.execute(f"DELETE FROM jobs WHERE id IN ({','.join('?'*len(to_delete))})", list(to_delete))
-        c.commit()
+    c.execute(
+        "UPDATE jobs SET status='skip' WHERE status='approved' AND posted_date != '' "
+        "AND platform != 'citi' AND posted_date < datetime('now', ?)",
+        (f"-{max_age_days} days",)
+    )
+    c.execute(
+        "UPDATE jobs SET status='skip' WHERE status='approved' AND posted_date != '' "
+        "AND platform = 'citi' AND posted_date < datetime('now', ?)",
+        (f"-{citi_max_age_days} days",)
+    )
+    count = c.total_changes
+    c.commit()
     c.close()
-    return len(to_delete)
+    return count
 
 
 def stats() -> dict:

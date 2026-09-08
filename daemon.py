@@ -1,166 +1,155 @@
 """
-Daemon — scans every 20 minutes, auto-builds resumes for top matches, emails results.
+Daemon — scan-only loop.
+
+Scrapes every SCAN_INTERVAL_SECONDS and screens each fresh posting against the
+LLM criteria in job_scanner/quality.py (one Gemma call per criterion). Jobs that
+pass every criterion are saved as 'approved' with a 0-100 fit score; the rest are
+saved as 'rejected'. Review approved jobs in the dashboard.
 
 Run: uv run python main.py daemon
-Stop: Ctrl+C
 """
 from __future__ import annotations
 import asyncio
-import json
 import time
 from pathlib import Path
 from rich.console import Console
 from rich.rule import Rule
 
-_STATUS_FILE = Path("data/active_build.json")
-
-
-def _write_build_status(company: str, title: str, message: str) -> None:
-    try:
-        _STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _STATUS_FILE.write_text(json.dumps({
-            "source": "daemon",
-            "company": company,
-            "title": title,
-            "message": message,
-            "started": time.time(),
-        }))
-    except Exception:
-        pass
-
-
-def _clear_build_status() -> None:
-    try:
-        _STATUS_FILE.unlink(missing_ok=True)
-    except Exception:
-        pass
-
 import config
-from job_scanner.scanner import run_scan
-from job_scanner.store import list_jobs, update_status, stats, prune_to_top_n
-from notifier import send_job_email
+from job_scanner.scanner import run_scan, screen_and_save
+from job_scanner.store import stats, expire_old_jobs
+from job_scanner.sources.google_xr import scrape_google_xr
+from job_scanner.xr_store import save_xr_jobs, xr_stats
+from job_scanner.sources.linkedin import scrape_linkedin
+
 
 console = Console()
 
-
-def _find_pdfs(company: str) -> tuple[Path | None, Path | None]:
-    """Find the most recently generated PDF pair for a company."""
-    from resume_builder.utils import sanitize_filename
-    out = Path("output")
-    safe = sanitize_filename(company)
-    resume  = out / "resumes"       / f"Pratham_Saraf_Resume_{safe}.pdf"
-    cover   = out / "cover_letters" / f"Pratham_Saraf_CoverLetter_{safe}.pdf"
-    return (resume if resume.exists() else None,
-            cover  if cover.exists()  else None)
+XR_SCAN_INTERVAL_SECONDS = 30 * 60        # Google XR tracker: independent 30-min cadence
+LINKEDIN_SCAN_INTERVAL_SECONDS = 30 * 60  # LinkedIn: independent 30-min cadence (see
+                                           # job_scanner/sources/linkedin.py for why —
+                                           # the authenticated redirect-resolution step
+                                           # is rate-limited more aggressively than
+                                           # everything else, so it stays off the main
+                                           # 20-min loop)
 
 
-def _build_resume_for_job(job: dict) -> tuple[Path | None, Path | None]:
-    """Run the full resume pipeline for a job. Returns (resume_pdf, cover_pdf)."""
-    from graph.db import init_db
-    from graph.schema import create_schema
-    from resume_builder.pipeline import run_pipeline
+# ── Scan loop ─────────────────────────────────────────────────────────────────
 
-    conn = init_db()
-    create_schema(conn)
-
-    desc = job.get("description", "")
-    if len(desc) < 200:
-        # Description too thin to build a good resume — skip
-        return None, None
-
-    run_pipeline(desc, compile_pdf=True, generate_cover=True)
-    return _find_pdfs(job.get("company", "unknown"))
-
-
-async def _scan_cycle(cycle: int) -> int:
-    """Run one scan cycle. Returns number of emails sent."""
-    console.print(Rule(f"[bold]Cycle {cycle}[/bold] — {time.strftime('%H:%M:%S')}"))
-
-    # 1. Scan all sources
-    result = await run_scan(
-        roles=config.DEFAULT_ROLES,
-        remote_only=config.REMOTE_ONLY,
-        min_score=config.MIN_SCORE_SAVE,
-    )
-    new_count = result["inserted"]
-    console.print(
-        f"  Scan: {result['raw']} raw → {result['after_filter']} passed → "
-        f"[cyan]{new_count} new saved[/cyan]"
-    )
-
-    # Prune DB — keep only top N by recency + score
-    pruned = prune_to_top_n(config.DB_KEEP_TOP)
-    if pruned:
-        console.print(f"  [dim]Pruned {pruned} older jobs — keeping top {config.DB_KEEP_TOP}[/dim]")
-
-    if new_count == 0:
-        console.print("  No new jobs this cycle.")
-        return 0
-
-    # 2. Pick top new jobs to email — newest first, then by score
-    top_jobs = [
-        j for j in list_jobs(status="new", limit=50)
-        if j["score"] >= config.MIN_SCORE_TO_EMAIL
-    ][:config.MAX_EMAILS_PER_SCAN]
-    # list_jobs already sorts by posted_date DESC, score DESC
-
-    if not top_jobs:
-        console.print(f"  No jobs above score {config.MIN_SCORE_TO_EMAIL} to email.")
-        return 0
-
-    console.print(f"  Building resumes for {len(top_jobs)} top match(es)...")
-
-    emails_sent = 0
-    for job in top_jobs:
-        title   = job["title"]
-        company = job["company"]
-        console.print(f"  → [bold]{title}[/bold] @ {company}  (score {job['score']})")
-        _write_build_status(company, title, f"Building resume for {title} @ {company}…")
-
+async def _scan_loop(scan_interval: int) -> None:
+    """Scrapes every scan_interval seconds and saves qualifying jobs to the DB."""
+    cycle = 1
+    while True:
+        console.print(Rule(f"[bold cyan]Scan {cycle}[/bold cyan] — {time.strftime('%H:%M:%S')}"))
         try:
-            resume_pdf, cover_pdf = _build_resume_for_job(job)
+            expired = await asyncio.get_running_loop().run_in_executor(
+                None, expire_old_jobs, config.MAX_JOB_AGE_DAYS)
+            if expired:
+                console.print(f"  [dim]Expired {expired} job(s) older than {config.MAX_JOB_AGE_DAYS} days → skip[/dim]")
+            result = await run_scan(
+                roles=config.DEFAULT_ROLES,
+                max_concurrent=config.MAX_SCREEN_CONCURRENCY,
+            )
+            console.print(
+                f"  Scan: {result['raw']} raw → {result['candidates']} screened → "
+                f"[green]{result['approved']} approved[/green], "
+                f"[dim]{result['rejected']} rejected[/dim]"
+            )
+            if result["approved"] == 0:
+                console.print("  No new approved jobs this scan.")
         except Exception as e:
-            console.print(f"    [red]Resume build failed:[/red] {e}")
-            update_status(job["id"], "error")
-            _clear_build_status()
-            continue
+            console.print(f"[red]Scan {cycle} error:[/red] {e}")
 
-        if not resume_pdf:
-            console.print("    [yellow]Skipped — description too thin for resume[/yellow]")
-            update_status(job["id"], "skip")
-            _clear_build_status()
-            continue
-
-        _write_build_status(company, title, "Sending email…")
-        ok = send_job_email(job, resume_pdf, cover_pdf)
-        if ok:
-            console.print(f"    [green]✓ Emailed to {config.GMAIL_RECIPIENT}[/green]")
-            emails_sent += 1
-        update_status(job["id"], "applied")
-        _clear_build_status()
-
-    return emails_sent
+        cycle += 1
+        next_run = time.strftime('%H:%M:%S', time.localtime(time.time() + scan_interval))
+        console.print(f"  [dim]Next scan at {next_run}[/dim]\n")
+        await asyncio.sleep(scan_interval)
 
 
-async def run_daemon() -> None:
-    console.print("[bold green]jobs-auto-scanner daemon started[/bold green]")
-    console.print(f"  Scan interval : every {config.SCAN_INTERVAL_SECONDS // 60} minutes")
-    console.print(f"  Email threshold: score >= {config.MIN_SCORE_TO_EMAIL}")
-    console.print(f"  Max emails/cycle: {config.MAX_EMAILS_PER_SCAN}")
-    console.print(f"  Roles: {', '.join(config.DEFAULT_ROLES)}")
-    console.print("  Press Ctrl+C to stop.\n")
+# ── Google XR tracker loop (independent — own table, no LLM, never touches ────
+# the main `jobs` table or the scan loop above; runs concurrently on its own
+# 30-min cadence via asyncio.gather in run_daemon()).
 
-    s = stats()
-    console.print(f"  DB: {s['total']} jobs stored ({s['by_status']})\n")
-
+async def _xr_loop(scan_interval: int) -> None:
     cycle = 1
     while True:
         try:
-            await _scan_cycle(cycle)
+            jobs = await scrape_google_xr()
+            ins, dup = await asyncio.get_running_loop().run_in_executor(None, save_xr_jobs, jobs)
+            console.print(
+                f"  [dim]Google XR tracker[/dim] cycle {cycle}: {len(jobs)} found, "
+                f"[cyan]{ins} new[/cyan], {dup} already tracked"
+            )
         except Exception as e:
-            console.print(f"[red]Cycle {cycle} error:[/red] {e}")
-
+            console.print(f"  [dim]Google XR tracker error:[/dim] {e}")
         cycle += 1
-        next_run = time.strftime('%H:%M:%S', time.localtime(time.time() + config.SCAN_INTERVAL_SECONDS))
-        console.print(f"\n  [dim]Next scan at {next_run}. Sleeping...[/dim]\n")
-        await asyncio.sleep(config.SCAN_INTERVAL_SECONDS)
+        await asyncio.sleep(scan_interval)
+
+
+# ── LinkedIn loop (independent — feeds the SAME main `jobs` table and LLM ─────
+# screen as the normal scan loop, just on its own slower/more-conservative
+# cadence since it's the only source touching an authenticated LinkedIn
+# session; see job_scanner/sources/linkedin.py for the full design).
+
+async def _linkedin_loop(scan_interval: int) -> None:
+    cycle = 1
+    while True:
+        try:
+            jobs = await scrape_linkedin()
+            if jobs:
+                result = await screen_and_save(jobs, max_concurrent=config.MAX_SCREEN_CONCURRENCY)
+                console.print(
+                    f"  [dim]LinkedIn[/dim] cycle {cycle}: {len(jobs)} resolved → "
+                    f"[green]{result['approved']} approved[/green], "
+                    f"[dim]{result['rejected']} rejected[/dim]"
+                )
+            else:
+                console.print(f"  [dim]LinkedIn[/dim] cycle {cycle}: nothing new")
+        except Exception as e:
+            console.print(f"  [dim]LinkedIn error:[/dim] {e}")
+        cycle += 1
+        await asyncio.sleep(scan_interval)
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+async def run_daemon() -> None:
+    import os
+    _PID_FILE = Path("data/daemon.pid")
+    try:
+        _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _PID_FILE.write_text(str(os.getpid()))
+    except Exception:
+        pass
+
+    from job_scanner.quality import CRITERIA
+    console.print("[bold green]Jobs scanner daemon started[/bold green]")
+    console.print(f"  Scan every   : {config.SCAN_INTERVAL_SECONDS // 60} minutes")
+    console.print(f"  Criteria     : {len(CRITERIA)} LLM checks per job (approve if all pass)")
+    console.print(f"  Strong match : fit score >= {config.MIN_SCORE_GOOD}")
+    console.print(f"  Roles        : {', '.join(config.DEFAULT_ROLES)}\n")
+
+    s = stats()
+    console.print(f"  DB: {s['total']} jobs  {s['by_status']}\n")
+
+    xr_s = xr_stats()
+    console.print(f"  Google XR tracker : every {XR_SCAN_INTERVAL_SECONDS // 60} min "
+                  f"(independent, non-senior + US + XR/AR/VR only, no LLM) — "
+                  f"{xr_s['total']} tracked so far\n")
+
+    from pathlib import Path as _Path
+    li_state = _Path("data/linkedin_auth/state.json")
+    console.print(f"  LinkedIn source   : every {LINKEDIN_SCAN_INTERVAL_SECONDS // 60} min "
+                  f"(Software Engineer, past 1hr, Easy Apply skipped, "
+                  f"feeds the normal LLM screen) — "
+                  f"{'session ready' if li_state.exists() else '[yellow]no saved session, will no-op[/yellow]'}\n")
+
+    # Three fully independent loops: the main LLM-screened scan, the
+    # deterministic Google XR tracker, and the LinkedIn redirect-resolution
+    # loop (LLM-screened, but on its own slower cadence). They share nothing
+    # except the process (and, for scan/LinkedIn, the same `jobs` table).
+    await asyncio.gather(
+        _scan_loop(config.SCAN_INTERVAL_SECONDS),
+        _xr_loop(XR_SCAN_INTERVAL_SECONDS),
+        _linkedin_loop(LINKEDIN_SCAN_INTERVAL_SECONDS),
+    )

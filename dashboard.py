@@ -1,25 +1,24 @@
 """
-Dashboard for jobs-auto-scanner.
+Dashboard for jobs-auto-scanner (scan-only).
 Run: uv run python main.py dashboard  →  http://localhost:8765
 """
 from __future__ import annotations
-import json, os, signal, subprocess, threading, time, uuid
+import json, os, signal, subprocess, threading, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 import config
 from job_scanner.store import list_jobs, stats, update_status
+from job_scanner.xr_store import list_xr_jobs, xr_stats
+
+# ── Google XR tracker state (completely separate feature — own table, own
+# scraper, no LLM, no daemon involvement; a scan only runs when triggered from
+# this tab's Refresh button, in a background thread) ───────────────────────────
+_xr_scanning = False
 
 PORT       = 8765
 _PID_FILE  = Path("data/daemon.pid")
-
-# ── Build queue + state ───────────────────────────────────────────────────────
-_queue:      list[dict]       = []   # [{id, jd, hint, added_at}]
-_builds:     dict[str, dict]  = {}   # id → {status, message, company, elapsed}
-_active_id:  str | None       = None
-_gen_paused: bool             = False
-_q_lock    = threading.Lock()
 
 
 def _scraper_running() -> bool:
@@ -64,54 +63,68 @@ def _scraper_stop() -> bool:
         return False
 
 
-def _run_one(item: dict) -> None:
-    global _active_id
-    bid = item["id"]
-    _active_id = bid
-    _builds[bid] = {"status": "running", "message": "Analysing JD…", "hint": item.get("hint", ""), "started": time.time()}
-    try:
-        from graph.db import init_db
-        from graph.schema import create_schema
-        from resume_builder.pipeline import run_pipeline
-        conn = init_db(); create_schema(conn)
-        _builds[bid]["message"] = "Building resume…"
-        result = run_pipeline(item["jd"], compile_pdf=True, generate_cover=True)
-        if result.get("error"):
-            _builds[bid].update({"status": "error", "message": f"Rejected: {result['error']}"})
-        else:
-            company = result.get("jd_analysis", {}).get("company_name", "Unknown")
-            pages   = result.get("page_check", "?")
-            _builds[bid].update({"status": "done", "message": f"Done · {pages}", "company": company})
-    except Exception as e:
-        _builds[bid].update({"status": "error", "message": str(e)[:180]})
-    finally:
-        _active_id = None
+# ── Google XR tracker: background scan trigger ─────────────────────────────────
+def _xr_scan_start() -> bool:
+    """Fire the standalone XR scraper in a background thread. Never touches the
+    main `jobs` table, the LLM, or the daemon — fully isolated side effect."""
+    global _xr_scanning
+    if _xr_scanning:
+        return False
+    _xr_scanning = True
 
+    def _run():
+        global _xr_scanning
+        try:
+            import asyncio as _asyncio
+            from job_scanner.sources.google_xr import scrape_google_xr
+            from job_scanner.xr_store import save_xr_jobs
+            jobs = _asyncio.run(scrape_google_xr())
+            save_xr_jobs(jobs)
+        except Exception:
+            pass
+        finally:
+            _xr_scanning = False
 
-def _queue_worker() -> None:
-    while True:
-        if not _gen_paused:
-            with _q_lock:
-                item = _queue.pop(0) if _queue else None
-            if item:
-                _run_one(item)
-        time.sleep(2)
-
-
-threading.Thread(target=_queue_worker, daemon=True).start()
+    threading.Thread(target=_run, daemon=True).start()
+    return True
 
 
 # ── HTML helpers ──────────────────────────────────────────────────────────────
 def _esc(s: str) -> str:
     return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
 
-def _resume_exists(company: str) -> bool:
-    from resume_builder.utils import sanitize_filename
-    return (Path("output")/"resumes"/f"Pratham_Saraf_Resume_{sanitize_filename(company)}.pdf").exists()
 
-def _cover_exists(company: str) -> bool:
-    from resume_builder.utils import sanitize_filename
-    return (Path("output")/"cover_letters"/f"Pratham_Saraf_CoverLetter_{sanitize_filename(company)}.pdf").exists()
+def _xr_grid(jobs: list[dict]) -> str:
+    """Independent grid renderer for the Google XR tab — deliberately NOT
+    reusing _jobs_grid, since that one is wired to the main `jobs` table's
+    score/status/mark-applied logic. Same visual language (.dg/.dgr CSS), own
+    columns: title/company, location, posted date, link."""
+    if not jobs:
+        return '<div class="empty">No XR roles tracked yet &mdash; hit Scan Now.</div>'
+    rows = []
+    for j in jobs:
+        title = _esc(j.get("title", "")); loc = _esc(j.get("location", ""))
+        dt = (j.get("posted_date") or "")[:10] or "—"
+        url = _esc(j.get("url", ""))
+        apply = f'<a href="{url}" target="_blank" class="apla">View &#x2197;</a>' if url else ""
+        rows.append(
+            f'<div class="dgr" data-date="{_esc(j.get("posted_date","") or "")}">'
+            f'<div class="gc"><div class="jt" title="{title}">{title}</div><div class="jco">Google</div></div>'
+            f'<div class="gc"><span class="jpl">{loc}</span></div>'
+            f'<div class="gc"><span class="jdt">{dt}</span></div>'
+            f'<div class="gc">{apply}</div>'
+            f'</div>'
+        )
+    hdr = (
+        '<div class="dgh" style="grid-template-columns:minmax(220px,1fr) minmax(160px,.9fr) 92px 80px">'
+        '<span>Role</span><span>Location</span><span>Posted</span><span></span></div>'
+    )
+    rows_html = "".join(rows).replace(
+        'class="dgr"', 'class="dgr" style="grid-template-columns:minmax(220px,1fr) minmax(160px,.9fr) 92px 80px"'
+    )
+    return f'<div class="dg" id="xr-grid">{hdr}{rows_html}</div>'
+
+
 
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
@@ -272,13 +285,13 @@ body{background:var(--bg);color:var(--tx);font-family:var(--fm);font-size:13px;
 /* data grid */
 .dg{background:var(--sf);border:1px solid var(--bd);border-radius:8px;overflow:hidden;overflow-x:auto}
 .dgh{display:grid;
-  grid-template-columns:44px minmax(180px,1fr) 92px 76px minmax(100px,.65fr) 92px 72px 80px;
+  grid-template-columns:44px minmax(180px,1fr) 92px 76px minmax(100px,.6fr) 88px 150px;
   padding:9px 16px;border-bottom:1px solid var(--bd);background:var(--sf2)}
 .dgh span{font-size:10px;letter-spacing:.12em;text-transform:uppercase;
   color:var(--t3);font-weight:700;padding:0 6px}
 .dgh span:first-child{padding-left:0}
 .dgr{display:grid;
-  grid-template-columns:44px minmax(180px,1fr) 92px 76px minmax(100px,.65fr) 92px 72px 80px;
+  grid-template-columns:44px minmax(180px,1fr) 92px 76px minmax(100px,.6fr) 88px 150px;
   padding:10px 16px;border-bottom:1px solid var(--bd);
   align-items:center;transition:background .12s;animation:row-in .25s ease both}
 .dgr:last-child{border-bottom:none}
@@ -347,6 +360,32 @@ body{background:var(--bg);color:var(--tx);font-family:var(--fm);font-size:13px;
 .toast.hidden{display:none}
 @keyframes toast-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
+/* mark applied button */
+.mark-applied-btn{padding:4px 10px;border-radius:4px;font-family:var(--fm);font-size:9.5px;
+  font-weight:700;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;
+  border:1px solid rgba(30,122,62,0.35);background:var(--gr-sf);color:var(--gr);
+  transition:background .12s,color .12s,border-color .12s;white-space:nowrap}
+.mark-applied-btn:hover{background:var(--gr);color:#fff;border-color:var(--gr)}
+.mark-applied-btn:disabled{opacity:.5;cursor:default}
+.mark-applied-done{font-size:9.5px;font-weight:700;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--gr);white-space:nowrap}
+
+/* sort bar */
+.sortbar{display:flex;align-items:center;gap:8px;margin:0 0 10px;flex-wrap:wrap}
+.sortbar-l{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--t4);font-weight:700}
+.search-box{flex:1;min-width:180px;max-width:360px;padding:6px 12px;border-radius:5px;
+  border:1px solid var(--bd);background:var(--sf);color:var(--tx);font-family:var(--fm);
+  font-size:12px;outline:none;transition:border-color .12s}
+.search-box:focus{border-color:var(--ac)}
+.search-box::placeholder{color:var(--t4)}
+.search-count{font-size:10px;color:var(--t4);letter-spacing:.04em;white-space:nowrap}
+.sort-btn{padding:5px 12px;border-radius:5px;font-family:var(--fm);font-size:10px;font-weight:700;
+  letter-spacing:.08em;text-transform:uppercase;cursor:pointer;border:1px solid var(--bd);
+  background:var(--sf2);color:var(--t2);transition:all .12s}
+.sort-btn:hover{border-color:var(--ac);color:var(--ac)}
+.sort-btn.active{background:var(--ac);color:#fff;border-color:var(--ac)}
+.sort-btn .arr{margin-left:5px;opacity:.8}
+
 /* footer */
 .footer{margin-top:60px;padding-top:18px;border-top:1px solid var(--bd);
   display:flex;justify-content:space-between;font-size:10px;color:var(--t4);letter-spacing:.08em}
@@ -377,8 +416,22 @@ function switchTab(t) {
 function ctlScraper(action) {
   fetch('/api/scraper/' + action, {method:'POST'}).then(function(){ setTimeout(pollOverview, 400); });
 }
-function ctlGen() {
-  fetch('/api/generation/toggle', {method:'POST'}).then(function(){ setTimeout(pollOverview, 400); });
+
+// ── Google XR tracker (fully independent of the main scanner) ─────────────────
+function ctlXrScan() {
+  var btn = document.getElementById('xr-scan-btn');
+  var lbl = document.getElementById('xr-lbl');
+  var dot = document.getElementById('xr-dot');
+  if (btn) { btn.disabled = true; }
+  if (lbl) { lbl.textContent = 'Scanning…'; lbl.className = 'sctrl-status off'; }
+  if (dot) { dot.className = 'dot dot-am'; }
+  fetch('/api/xr/scan', {method:'POST'}).then(function(){
+    var poll = setInterval(function(){
+      fetch('/api/xr/status').then(function(r){return r.json();}).then(function(d){
+        if (!d.scanning) { clearInterval(poll); window.location.reload(); }
+      }).catch(function(){});
+    }, 3000);
+  });
 }
 
 // ── Sections collapse ─────────────────────────────────────────────────────────
@@ -415,110 +468,136 @@ function pollOverview() {
       if (sstart) sstart.style.display = d.scraper ? 'none' : '';
       if (sstop)  sstop.style.display  = d.scraper ? '' : 'none';
     }
-    // gen status dot (eyebrow on active build card)
-    var gsdot = document.getElementById('gen-status-dot');
-    if (gsdot) gsdot.className = 'dot ' + (d.gen_paused ? 'dot-muted' : (d.active ? 'dot-am' : 'dot-gr'));
-    // gen pause controls
-    var pdot = document.getElementById('gen-dot');
-    var plbl = document.getElementById('gen-lbl');
-    var pbtn = document.getElementById('gen-pause');
-    if (pdot && plbl) {
-      pdot.className = 'dot ' + (d.gen_paused ? 'dot-muted' : (d.active ? 'dot-am' : 'dot-gr'));
-      plbl.textContent = d.gen_paused ? 'Paused' : (d.active ? 'Building…' : 'Idle');
-      plbl.className = 'sctrl-status ' + (d.gen_paused ? 'off' : 'on');
-      if (pbtn) pbtn.textContent = d.gen_paused ? 'Resume' : 'Pause';
-    }
-    // active build
-    var ab = document.getElementById('active-build');
-    if (ab) {
-      if (d.active) {
-        var elapsed = d.active.elapsed ? Math.round(d.active.elapsed) + 's' : '';
-        ab.innerHTML =
-          '<div class="abuild-co">' + (d.active.company || d.active.hint || 'Building…') + '</div>' +
-          '<div class="abuild-msg">' + (d.active.message||'') + '</div>' +
-          '<div class="abuild-bar"><div class="abuild-fill"></div></div>' +
-          '<div class="abuild-elapsed">Elapsed: ' + elapsed + '</div>';
-      } else {
-        ab.innerHTML = '<div class="abuild-idle">No active build</div>';
-      }
-    }
-    // queue
-    var ql = document.getElementById('queue-list');
-    if (ql) {
-      if (!d.queue || d.queue.length === 0) {
-        ql.innerHTML = '<div class="qi-empty">Queue is empty</div>';
-      } else {
-        ql.innerHTML = d.queue.map(function(item, i) {
-          return '<div class="qi" data-id="'+item.id+'">' +
-            '<span class="qi-num">'+(i+1)+'</span>' +
-            '<div class="qi-info">' +
-              '<div class="qi-hint">'+(item.hint||'Untitled JD')+'</div>' +
-              '<div class="qi-jd">'+(item.jd||'').substring(0,80)+'…</div>' +
-            '</div>' +
-            '<div class="qi-acts">' +
-              (i > 0 ? '<button class="qi-btn up" onclick="qMove(\\\''+item.id+'\\\',\\'up\\')">↑</button>' : '') +
-              '<button class="qi-btn" onclick="qRemove(\\\''+item.id+'\\\')">✕</button>' +
-            '</div>' +
-          '</div>';
-        }).join('');
-      }
+    // tab counts + stat cards
+    var tabs = document.querySelectorAll('.tab');
+    tabs.forEach(function(t) {
+      if (t.dataset.tab === 'approved') t.textContent = 'Approved (' + d.approved_count + ')';
+      if (t.dataset.tab === 'rejected') t.textContent = 'Rejected (' + d.rejected_count + ')';
+    });
+    var cards = document.querySelectorAll('.sc .sn');
+    if (cards.length >= 4) {
+      cards[0].textContent = d.total;
+      cards[1].textContent = d.approved_count;
+      cards[2].textContent = d.applied_count;
+      cards[3].textContent = d.rejected_count;
     }
   }).catch(function(){});
 }
 setInterval(pollOverview, 2500);
 pollOverview();
 
-function qMove(id, dir) {
-  fetch('/api/queue/move', {method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({id:id,dir:dir})}).then(pollOverview);
-}
-function qRemove(id) {
-  fetch('/api/queue/remove', {method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({id:id})}).then(pollOverview);
-}
-// ── Build modal ───────────────────────────────────────────────────────────────
-var overlay  = document.getElementById('build-overlay');
-var runBtn   = document.getElementById('build-run');
-var statusEl = document.getElementById('build-status');
-var toast    = document.getElementById('build-toast');
-
-function openModal() { if(overlay) overlay.classList.add('open'); }
-function closeModal() { if(overlay) overlay.classList.remove('open'); }
-if(overlay) overlay.addEventListener('click', function(e){ if(e.target===overlay) closeModal(); });
-document.addEventListener('keydown', function(e){ if(e.key==='Escape') closeModal(); });
-
-function submitBuild() {
-  var jd   = document.getElementById('build-ta').value.trim();
-  var hint = document.getElementById('build-hint').value.trim();
-  if (!jd) { statusEl.textContent='Paste a JD first.'; statusEl.className='modal-status err'; return; }
-  runBtn.disabled=true; runBtn.textContent='Queued…';
-  statusEl.textContent='Adding to queue…'; statusEl.className='modal-status run';
-  fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({jd:jd,hint:hint})})
-  .then(function(r){return r.json();})
-  .then(function(d){
-    statusEl.textContent='Added to queue (#'+(d.position||'?')+')';
-    statusEl.className='modal-status ok';
-    runBtn.disabled=false; runBtn.textContent='Add to Queue';
-    showToast('Added to queue'+(hint?' — '+hint:''));
-    pollOverview();
-  })
-  .catch(function(e){
-    statusEl.textContent='Error: '+e; statusEl.className='modal-status err';
-    runBtn.disabled=false; runBtn.textContent='Add to Queue';
-  });
-}
+var toast = document.getElementById('build-toast');
 
 function showToast(msg) {
   toast.textContent=msg; toast.classList.remove('hidden');
   setTimeout(function(){ toast.classList.add('hidden'); }, 4500);
 }
+
+function markApplied(jobId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  fetch('/api/job/mark_applied', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({id:jobId})})
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if (d.ok) {
+      btn.outerHTML = '<span class="mark-applied-done">&#x2713; Applied</span>';
+      showToast('Marked as applied');
+    } else {
+      btn.disabled = false; btn.textContent = '✓ Mark Applied';
+    }
+  })
+  .catch(function(){ btn.disabled = false; btn.textContent = '✓ Mark Applied'; });
+}
+
+// ── Approved-grid sorting (client-side, persisted) ────────────────────────────
+function _applySort(gridId, key, dir) {
+  var grid = document.getElementById(gridId);
+  if (!grid) return;
+  var rows = Array.prototype.slice.call(grid.querySelectorAll('.dgr'));
+  rows.sort(function(a, b) {
+    var va, vb;
+    if (key === 'score')      { va = parseFloat(a.dataset.score) || 0; vb = parseFloat(b.dataset.score) || 0; }
+    else if (key === 'added') { va = a.dataset.added || ''; vb = b.dataset.added || ''; }
+    else                      { va = a.dataset.date || ''; vb = b.dataset.date || ''; }
+    if (va < vb) return dir === 'asc' ? -1 : 1;
+    if (va > vb) return dir === 'asc' ?  1 : -1;
+    return 0;
+  });
+  rows.forEach(function(r){
+    grid.appendChild(r);
+    // appendChild re-inserts the row, which can leave its one-shot 'row-in'
+    // fade-in animation (opacity 0 -> 1, fill-mode both) stuck at the STARTING
+    // keyframe (opacity:0) instead of replaying or holding at the end state —
+    // rows then render as fully invisible even though they're in the DOM.
+    // Strip the animation and force full opacity so a re-sort can never hide rows.
+    r.style.animation = 'none';
+    r.style.opacity = '1';
+  });
+  // Each grid's own sort bar (identified by data-grid) updates independently —
+  // separate grids can reuse the same .sort-btn class without stomping on
+  // each other's active/label state.
+  var labels = {date: 'Date', score: 'Rating', added: 'Added'};
+  var bar = document.querySelector('.sortbar[data-grid="' + gridId + '"]');
+  if (bar) {
+    bar.querySelectorAll('.sort-btn').forEach(function(btn) {
+      var active = btn.dataset.key === key;
+      btn.classList.toggle('active', active);
+      btn.innerHTML = labels[btn.dataset.key] + (active ? '<span class="arr">' + (dir === 'asc' ? '↑' : '↓') + '</span>' : '');
+    });
+  }
+}
+function sortGrid(gridId, key) {
+  var storeKey = 'sort:' + gridId;
+  var saved = {};
+  try { saved = JSON.parse(localStorage.getItem(storeKey) || '{}'); } catch(e) {}
+  var dir = (saved.key === key && saved.dir === 'desc') ? 'asc' : 'desc';
+  _applySort(gridId, key, dir);
+  try { localStorage.setItem(storeKey, JSON.stringify({key: key, dir: dir})); } catch(e) {}
+}
+
+// ── Per-grid search (client-side, persisted, namespaced by gridId so the
+// Approved tab and the Google XR tab never share state) ──────────────────────
+function filterGrid(gridId, query) {
+  var grid = document.getElementById(gridId);
+  if (!grid) return;
+  var q = (query || '').trim().toLowerCase();
+  var shown = 0, total = 0;
+  grid.querySelectorAll('.dgr').forEach(function(row) {
+    total++;
+    var hit = !q || row.textContent.toLowerCase().indexOf(q) !== -1;
+    row.style.display = hit ? '' : 'none';
+    if (hit) shown++;
+  });
+  var lbl = document.getElementById(gridId.replace('-grid','') + '-search-count');
+  if (lbl) lbl.textContent = q ? (shown + ' / ' + total + ' match') : '';
+  try { localStorage.setItem('search:' + gridId, query || ''); } catch(e) {}
+}
+function _restoreGridState(gridId, searchInputId, defaultKey, defaultDir) {
+  var grid = document.getElementById(gridId);
+  if (!grid) return;
+  var q = '';
+  try { q = localStorage.getItem('search:' + gridId) || ''; } catch(e) {}
+  if (q) {
+    var box = document.getElementById(searchInputId);
+    if (box) { box.value = q; filterGrid(gridId, q); }
+  }
+  var saved = null;
+  try { saved = JSON.parse(localStorage.getItem('sort:' + gridId) || 'null'); } catch(e) {}
+  if (!saved) saved = {key: defaultKey, dir: defaultDir};
+  _applySort(gridId, saved.key, saved.dir);
+}
+_restoreGridState('approved-grid', 'approved-search', 'date', 'desc');
+_restoreGridState('rejected-grid', 'rejected-search', 'date', 'desc');
+_restoreGridState('xr-grid', 'xr-search', 'date', 'desc');
 """
 
 
 # ── Render helpers ────────────────────────────────────────────────────────────
 def _badge(status: str) -> str:
-    m = {"new":("bnw","New"),"applied":("bap","Emailed"),"skip":("bsk","Skipped"),"error":("ber","Error")}
+    m = {"approved":("bap","Approved"),"applied":("bnw","Applied"),
+         "rejected":("bsk","Rejected"),"skip":("bsk","Skipped"),"error":("ber","Error")}
     cls, label = m.get(status, ("bsk", status.title()))
     return f'<span class="bdg {cls}">{label}</span>'
 
@@ -537,93 +616,159 @@ def _score_arc(score: int) -> str:
     )
 
 
-def _jobs_grid(jobs: list[dict]) -> str:
+def _jobs_grid(jobs: list[dict], mark_applied: bool = True, grid_id: str = "") -> str:
     if not jobs:
         return '<div class="empty">No jobs</div>'
     rows = []
     for j in jobs:
         co=_esc(j.get("company",""));ti=_esc(j.get("title",""))
-        pl=_esc(j.get("platform","—"));dt=(j.get("posted_date") or "")[:10] or "—"
+        date_raw=(j.get("posted_date") or "")
+        pl=_esc(j.get("platform","—"));dt=date_raw[:10] or "—"
         sc=j.get("score",0);st=j.get("status","new")
+        jid=j.get("id","")
         url=_esc(j.get("url",""));rs=_esc(j.get("score_reason",""))
-        rr="y" if _resume_exists(j.get("company","")) else "n"
-        cr="y" if _cover_exists(j.get("company","")) else "n"
-        rs_sym="&#x2713;" if rr=="y" else "&mdash;"; cs_sym="&#x2713;" if cr=="y" else "&mdash;"
-        docs=f'<span class="jdc {rr}">R{rs_sym}</span>&nbsp;<span class="jdc {cr}">C{cs_sym}</span>'
         apply=f'<a href="{url}" target="_blank" class="apla">Apply &#x2197;</a>' if url else ""
+        if mark_applied and st != "applied":
+            mark_btn = f'<button class="mark-applied-btn" onclick="markApplied(\'{jid}\', this)">&#x2713; Mark Applied</button>'
+        elif mark_applied and st == "applied":
+            mark_btn = '<span class="mark-applied-done">&#x2713; Applied</span>'
+        else:
+            mark_btn = ""
+        actions = f'<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">{apply}{mark_btn}</div>'
+        added_raw=_esc(j.get("created_at","") or "")
         rows.append(
-            f'<div class="dgr">'
+            f'<div class="dgr" data-score="{sc}" data-date="{_esc(date_raw)}" data-added="{added_raw}">'
             f'<div class="gc">{_score_arc(sc)}</div>'
             f'<div class="gc"><div class="jt" title="{ti}">{ti}</div><div class="jco">{co}</div></div>'
             f'<div class="gc"><span class="jpl">{pl}</span></div>'
             f'<div class="gc"><span class="jdt">{dt}</span></div>'
             f'<div class="gc"><span class="jrs" title="{rs}">{rs}</span></div>'
             f'<div class="gc">{_badge(st)}</div>'
-            f'<div class="gc" style="white-space:nowrap">{docs}</div>'
-            f'<div class="gc">{apply}</div>'
+            f'<div class="gc">{actions}</div>'
             f'</div>'
         )
     hdr=(
         '<div class="dgh"><span></span><span>Role / Company</span><span>Source</span>'
-        '<span>Posted</span><span>Match</span><span>Status</span><span>Docs</span><span></span></div>'
+        '<span>Posted</span><span>Match</span><span>Status</span><span></span></div>'
     )
-    return f'<div class="dg">{hdr}{"".join(rows)}</div>'
+    idattr = f' id="{grid_id}"' if grid_id else ""
+    return f'<div class="dg"{idattr}>{hdr}{"".join(rows)}</div>'
 
 
 def _render_page() -> str:
     s=stats(); by_status=s.get("by_status",{}); total=s.get("total",0)
-    all_jobs=list_jobs(limit=200)
-    new_jobs=[j for j in all_jobs if j["status"]=="new"]
-    applied =[j for j in all_jobs if j["status"]=="applied"]
-    skipped =[j for j in all_jobs if j["status"] in ("skip","error")]
-    nc=by_status.get("new",0); ec=by_status.get("applied",0)
-    sc_n=by_status.get("skip",0)+by_status.get("error",0)
+    # Fetch each status list separately so a view shows a full list, not a slice.
+    approved_jobs=list_jobs(status="approved", limit=500)
+    applied      =list_jobs(status="applied",  limit=500)
+    rejected     =list_jobs(status="rejected", limit=500)
+    apc=by_status.get("approved",0); ac=by_status.get("applied",0)
+    rc=by_status.get("rejected",0)+by_status.get("skip",0)+by_status.get("error",0)
     plats=s.get("by_platform",{})
     plat_pills=" ".join(f'<span class="plat">{_esc(p)}<b>{c}</b></span>' for p,c in sorted(plats.items(),key=lambda x:-x[1])) or '<span class="plat">none yet</span>'
 
     stat_cards=(
-        f'<div class="sc ct"><div class="sn">{total}</div><div class="sl">Total</div></div>'
-        f'<div class="sc cn"><div class="sn">{nc}</div><div class="sl">New · Queued</div></div>'
-        f'<div class="sc ce"><div class="sn">{ec}</div><div class="sl">Emailed</div></div>'
-        f'<div class="sc cs"><div class="sn">{sc_n}</div><div class="sl">Skipped</div></div>'
+        f'<div class="sc ct"><div class="sn">{total}</div><div class="sl">Total Screened</div></div>'
+        f'<div class="sc ce"><div class="sn">{apc}</div><div class="sl">Approved</div></div>'
+        f'<div class="sc cn"><div class="sn">{ac}</div><div class="sl">Applied</div></div>'
+        f'<div class="sc cs"><div class="sn">{rc}</div><div class="sl">Rejected</div></div>'
     )
 
-    def sec(title, jobs, cls):
+    def sec(title, jobs, cls, grid_id=""):
         if not jobs: return ""
         return (
             f'<div class="sec {cls}"><div class="sech">'
             f'<div class="secbar"></div><span class="sect">{title}</span>'
             f'<span class="secc">{len(jobs)}</span><span class="secv">&#x203A;</span>'
-            f'</div><div class="secbd">{_jobs_grid(jobs)}</div></div>'
+            f'</div><div class="secbd">{_jobs_grid(jobs, grid_id=grid_id)}</div></div>'
         )
 
-    jobs_tab=(
-        f'<div class="plats"><span class="plats-l">Sources</span>{plat_pills}</div>'
-        + sec("New &mdash; Queued for Resume Build", new_jobs, "sec-nw")
-        + sec("Emailed", applied, "sec-em")
-        + sec("Skipped / Error", skipped, "sec-sk")
+    # Sort toolbar for the approved grid (client-side, persisted in localStorage)
+    sort_bar = (
+        '<div class="sortbar" data-grid="approved-grid">'
+        '<input class="search-box" id="approved-search" type="search" '
+        'placeholder="Search title, company, location, reason…" '
+        'oninput="filterGrid(\'approved-grid\', this.value)">'
+        '<span class="search-count" id="approved-search-count"></span>'
+        '<span class="sortbar-l">Sort by</span>'
+        '<button class="sort-btn" data-key="date" onclick="sortGrid(\'approved-grid\',\'date\')">Date</button>'
+        '<button class="sort-btn" data-key="score" onclick="sortGrid(\'approved-grid\',\'score\')">Rating</button>'
+        '<button class="sort-btn" data-key="added" onclick="sortGrid(\'approved-grid\',\'added\')">Added</button>'
+        '</div>'
     )
 
+    # ── Approved view: approved jobs + the ones you've already applied to ──────
+    approved_tab=(
+        f'<div class="plats"><span class="plats-l">Sources</span>{plat_pills}</div>'
+        + (((sort_bar + sec("Approved &mdash; Passed All Criteria", approved_jobs, "sec-em", "approved-grid")))
+           if approved_jobs else '<div class="empty">No approved jobs yet &mdash; screening in progress…</div>')
+        + sec("Applied", applied, "sec-nw")
+    )
+
+    # ── Rejected view: jobs that failed at least one criterion ────────────────
+    rejected_sort_bar = (
+        '<div class="sortbar" data-grid="rejected-grid">'
+        '<input class="search-box" id="rejected-search" type="search" '
+        'placeholder="Search title, company, location, reason…" '
+        'oninput="filterGrid(\'rejected-grid\', this.value)">'
+        '<span class="search-count" id="rejected-search-count"></span>'
+        '<span class="sortbar-l">Sort by</span>'
+        '<button class="sort-btn" data-key="date" onclick="sortGrid(\'rejected-grid\',\'date\')">Date</button>'
+        '<button class="sort-btn" data-key="score" onclick="sortGrid(\'rejected-grid\',\'score\')">Rating</button>'
+        '<button class="sort-btn" data-key="added" onclick="sortGrid(\'rejected-grid\',\'added\')">Added</button>'
+        '</div>'
+    )
+    rejected_tab=(
+        (rejected_sort_bar + sec("Rejected &mdash; Failed a Criterion", rejected, "sec-sk", "rejected-grid"))
+        if rejected else '<div class="empty">No rejected jobs yet.</div>'
+    )
+
+    # ── Google XR tracker — fully separate feature: own table (xr_jobs), own
+    # scraper, no LLM screening, no daemon involvement. Only 3 deterministic
+    # checks: non-senior title, US-based, XR/AR/VR related. Scan is manual
+    # (Scan Now button) so it never runs unprompted or touches the main flow.
+    xr_jobs_list = list_xr_jobs()
+    xr_s = xr_stats()
+    xr_sort_bar = (
+        '<div class="sortbar">'
+        '<input class="search-box" id="xr-search" type="search" '
+        'placeholder="Search title, location…" '
+        'oninput="filterGrid(\'xr-grid\', this.value)">'
+        '<span class="search-count" id="xr-search-count"></span>'
+        '<span class="sortbar-l">Sort by</span>'
+        '<button class="sort-btn" data-key="date" onclick="sortGrid(\'xr-grid\',\'date\')">Date</button>'
+        '</div>'
+    )
+    xr_tab = (
+        f'<div class="card" style="margin-bottom:14px">'
+        f'<div class="card-ey">Google XR / AR / VR Tracker</div>'
+        f'<div class="card-t">Independent Tracker</div>'
+        f'<div class="card-sub">Non-senior &middot; US-based &middot; XR/AR/VR only &mdash; independent of the main scan, no LLM screening. '
+        f'Auto-scans every 30 min in the daemon; use Scan Now for an on-demand refresh. '
+        f'Last scan: {_esc(xr_s["last_scan"] or "never")}</div>'
+        f'<div class="sctrl">'
+        f'<span class="dot {"dot-am" if _xr_scanning else "dot-muted"}" id="xr-dot"></span>'
+        f'<span class="sctrl-label">{xr_s["total"]} roles tracked &nbsp;<small style="color:var(--t4)">every 30m</small></span>'
+        f'<span class="sctrl-status {"off" if _xr_scanning else "on"}" id="xr-lbl">{"Scanning…" if _xr_scanning else "Idle"}</span>'
+        f'<button class="ctl-btn primary" id="xr-scan-btn" onclick="ctlXrScan()" {"disabled" if _xr_scanning else ""}>Scan Now</button>'
+        f'</div>'
+        f'</div>'
+        + xr_sort_bar
+        + _xr_grid(xr_jobs_list)
+    )
+
+    from job_scanner.quality import CRITERIA
+    _n_criteria = len(CRITERIA)
     scraper_on = _scraper_running()
     scan_mins  = config.SCAN_INTERVAL_SECONDS // 60
 
     overview_tab = (
         f'<div class="stats">{stat_cards}</div>'
-        f'<div class="row2">'
-
-        # ── Active Build card
-        f'<div class="card">'
-        f'<div class="card-ey"><span class="dot dot-am" id="gen-status-dot"></span>&nbsp;Resume Generator</div>'
-        f'<div class="card-t">Active Build</div>'
-        f'<div class="card-sub">Currently generating</div>'
-        f'<div id="active-build"><div class="abuild-idle">Loading&#8230;</div></div>'
-        f'</div>'
 
         # ── Controls card
         f'<div class="card">'
         f'<div class="card-ey">Controls</div>'
-        f'<div class="card-t">System</div>'
-        f'<div class="card-sub">Manage scraper and generator</div>'
+        f'<div class="card-t">Scanner</div>'
+        f'<div class="card-sub">Start or stop the background scan loop</div>'
 
         f'<div class="sctrl">'
         f'<span class="dot {"dot-gr" if scraper_on else "dot-muted"}" id="scraper-dot"></span>'
@@ -632,27 +777,7 @@ def _render_page() -> str:
         f'<button class="ctl-btn" id="scraper-start" onclick="ctlScraper(\'start\')" style="{"display:none" if scraper_on else ""}">Start</button>'
         f'<button class="ctl-btn danger" id="scraper-stop" onclick="ctlScraper(\'stop\')" style="{"" if scraper_on else "display:none"}">Stop</button>'
         f'</div>'
-
-        f'<div class="sctrl" style="margin-top:10px">'
-        f'<span class="dot {"dot-muted" if _gen_paused else "dot-gr"}" id="gen-dot"></span>'
-        f'<span class="sctrl-label">Resume Generator</span>'
-        f'<span class="sctrl-status {"off" if _gen_paused else "on"}" id="gen-lbl">{"Paused" if _gen_paused else "Idle"}</span>'
-        f'<button class="ctl-btn" id="gen-pause" onclick="ctlGen()">{"Resume" if _gen_paused else "Pause"}</button>'
-        f'</div>'
         f'</div>'  # end card
-        f'</div>'  # end row2
-
-        # ── Queue
-        f'<div class="card" style="margin-top:14px">'
-        f'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'
-        f'<div>'
-        f'<div class="card-ey" style="margin-bottom:4px">Generation Queue</div>'
-        f'<div class="card-t">Pending Builds</div>'
-        f'</div>'
-        f'<button class="build-btn" id="build-open" onclick="openModal()">&#x2b;&nbsp;Add JD</button>'
-        f'</div>'
-        f'<div id="queue-list"><div class="qi-empty">Loading…</div></div>'
-        f'</div>'
     )
 
     return (
@@ -671,23 +796,27 @@ def _render_page() -> str:
         f'        <h1 class="hdr-t">Job Hunt</h1>\n'
         f'        <div class="hdr-meta">\n'
         f'          <span class="hdr-mi">Refresh 20s</span>\n'
-        f'          <span class="hdr-mi">Score &ge; {config.MIN_SCORE_TO_EMAIL}</span>\n'
-        f'          <span class="hdr-mi">Cap {config.DB_KEEP_TOP}</span>\n'
+        f'          <span class="hdr-mi">{_n_criteria} LLM criteria</span>\n'
+        f'          <span class="hdr-mi">Strong fit &ge; {config.MIN_SCORE_GOOD}</span>\n'
         f'        </div>\n'
         f'      </div>\n'
         f'      <div class="hdr-r">\n'
-        f'        <span class="hdr-rl">Destination</span>\n'
-        f'        {_esc(config.GMAIL_RECIPIENT)}\n'
+        f'        <span class="hdr-rl">Scan every</span>\n'
+        f'        {scan_mins} min\n'
         f'      </div>\n'
         f'    </header>\n'
 
         f'    <nav class="tabs">\n'
         f'      <button class="tab active" data-tab="overview" onclick="switchTab(\'overview\')">Overview</button>\n'
-        f'      <button class="tab" data-tab="jobs" onclick="switchTab(\'jobs\')">Jobs ({total})</button>\n'
+        f'      <button class="tab" data-tab="approved" onclick="switchTab(\'approved\')">Approved ({apc})</button>\n'
+        f'      <button class="tab" data-tab="rejected" onclick="switchTab(\'rejected\')">Rejected ({rc})</button>\n'
+        f'      <button class="tab" data-tab="xr" onclick="switchTab(\'xr\')">Google XR ({xr_s["total"]})</button>\n'
         f'    </nav>\n'
 
         f'    <div class="tabp active" id="tab-overview">{overview_tab}</div>\n'
-        f'    <div class="tabp" id="tab-jobs">{jobs_tab}</div>\n'
+        f'    <div class="tabp" id="tab-approved">{approved_tab}</div>\n'
+        f'    <div class="tabp" id="tab-rejected">{rejected_tab}</div>\n'
+        f'    <div class="tabp" id="tab-xr">{xr_tab}</div>\n'
 
         f'    <footer class="footer">\n'
         f'      <span>Jobs Auto Scanner</span>\n'
@@ -695,19 +824,6 @@ def _render_page() -> str:
         f'    </footer>\n'
         f'  </div>\n'
 
-        f'  <div class="modal-ov" id="build-overlay">\n'
-        f'    <div class="modal">\n'
-        f'      <div class="modal-ey">Resume Builder</div>\n'
-        f'      <div class="modal-title">Add Job to Queue</div>\n'
-        f'      <input class="modal-hint" id="build-hint" placeholder="Company / role hint (optional)">\n'
-        f'      <textarea class="modal-ta" id="build-ta" placeholder="Paste the full job description here…"></textarea>\n'
-        f'      <div class="modal-actions">\n'
-        f'        <button class="modal-cancel" id="build-cancel" onclick="closeModal()">Cancel</button>\n'
-        f'        <span class="modal-status" id="build-status"></span>\n'
-        f'        <button class="build-btn" id="build-run" onclick="submitBuild()">Add to Queue</button>\n'
-        f'      </div>\n'
-        f'    </div>\n'
-        f'  </div>\n'
         f'  <div class="toast hidden" id="build-toast"></div>\n'
         f'  <script>{_JS}</script>\n'
         f'</body>\n</html>'
@@ -738,70 +854,26 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        if p.path == "/api/stats":
-            self._json(stats()); return
-
         if p.path == "/api/overview":
-            active_info = None
-            if _active_id and _active_id in _builds:
-                b = _builds[_active_id]
-                active_info = {
-                    "id": _active_id,
-                    "status": b.get("status"),
-                    "message": b.get("message"),
-                    "company": b.get("company") or b.get("hint", ""),
-                    "hint": b.get("hint", ""),
-                    "elapsed": round(time.time() - b["started"]) if "started" in b else 0,
-                }
-            # Merge daemon's active build if dashboard queue is idle
-            if not active_info:
-                try:
-                    sf = Path("data/active_build.json")
-                    if sf.exists():
-                        d = json.loads(sf.read_text())
-                        active_info = {
-                            "id": "daemon",
-                            "status": "running",
-                            "message": d.get("message", "Building…"),
-                            "company": d.get("company", ""),
-                            "hint": d.get("title", ""),
-                            "elapsed": round(time.time() - d["started"]) if "started" in d else 0,
-                        }
-                except Exception:
-                    pass
-            with _q_lock:
-                queue_snapshot = [{"id": i["id"], "hint": i.get("hint",""), "jd": i["jd"][:60]} for i in _queue]
+            job_stats = stats()
+            by_status = job_stats.get("by_status", {})
             self._json({
                 "scraper": _scraper_running(),
-                "gen_paused": _gen_paused,
-                "active": active_info,
-                "queue": queue_snapshot,
-                "queue_len": len(queue_snapshot),
+                "total": job_stats.get("total", 0),
+                "approved_count": by_status.get("approved", 0),
+                "applied_count": by_status.get("applied", 0),
+                "rejected_count": by_status.get("rejected", 0) + by_status.get("skip", 0) + by_status.get("error", 0),
             }); return
 
-        if p.path == "/api/build/status":
-            bid = parse_qs(p.query).get("id", [None])[0]
-            self._json(_builds.get(bid, {"status": "unknown", "message": "not found"})); return
+        if p.path == "/api/xr/status":
+            self._json({"scanning": _xr_scanning}); return
 
         self.send_response(404); self.end_headers()
 
     def do_POST(self):
-        global _gen_paused
         length  = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length) or b"{}")
         p       = self.path
-
-        if p == "/api/build":
-            jd   = payload.get("jd", "").strip()
-            hint = payload.get("hint", "").strip()
-            if not jd:
-                self._json({"error": "empty JD"}, 400); return
-            bid = uuid.uuid4().hex[:12]
-            with _q_lock:
-                _queue.append({"id": bid, "jd": jd, "hint": hint, "added": time.time()})
-                pos = len(_queue)
-            _builds[bid] = {"status": "queued", "message": "Waiting in queue…", "hint": hint}
-            self._json({"id": bid, "position": pos}); return
 
         if p == "/api/scraper/start":
             self._json({"ok": _scraper_start()}); return
@@ -809,25 +881,15 @@ class _Handler(BaseHTTPRequestHandler):
         if p == "/api/scraper/stop":
             self._json({"ok": _scraper_stop()}); return
 
-        if p == "/api/generation/toggle":
-            _gen_paused = not _gen_paused
-            self._json({"paused": _gen_paused}); return
+        if p == "/api/job/mark_applied":
+            jid = payload.get("id", "").strip()
+            if jid:
+                update_status(jid, "applied")
+                self._json({"ok": True}); return
+            self._json({"ok": False}, 400); return
 
-        if p == "/api/queue/remove":
-            bid = payload.get("id")
-            with _q_lock:
-                before = len(_queue)
-                _queue[:] = [i for i in _queue if i["id"] != bid]
-            self._json({"removed": len(_queue) < before}); return
-
-        if p == "/api/queue/move":
-            bid = payload.get("id"); direction = payload.get("dir", "up")
-            with _q_lock:
-                idx = next((i for i, x in enumerate(_queue) if x["id"] == bid), None)
-                if idx is not None:
-                    new_idx = max(0, idx-1) if direction == "up" else min(len(_queue)-1, idx+1)
-                    _queue.insert(new_idx, _queue.pop(idx))
-            self._json({"ok": True}); return
+        if p == "/api/xr/scan":
+            self._json({"ok": _xr_scan_start()}); return
 
         self.send_response(404); self.end_headers()
 

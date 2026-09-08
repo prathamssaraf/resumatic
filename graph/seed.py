@@ -143,7 +143,7 @@ def seed_role_types(conn: kuzu.Connection) -> None:
         _q(conn,
             "MERGE (r:RoleType {id: $id}) "
             "SET r.name=$name, r.description=$description, "
-            "r.hpe_title=$hpe_title, r.ongc_title=$ongc_title, "
+            "r.wequity_title=$wequity_title, r.hpe_title=$hpe_title, r.ongc_title=$ongc_title, "
             "r.skills_order=$skills_order, r.project_priority=$project_priority, "
             "r.emphasis=$emphasis",
             role,

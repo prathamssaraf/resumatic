@@ -20,8 +20,11 @@ def _strip_think(text: str) -> str:
     # Standard <think>...</think> block
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     # K2 variant: reasoning prose followed by bare </think> (no opening tag)
+    # Only apply if there's actual content after the closing tag
     if "</think>" in text:
-        text = text[text.index("</think>") + len("</think>"):]
+        after = text[text.index("</think>") + len("</think>"):].strip()
+        if after:
+            text = after
     return text.strip()
 
 
@@ -125,47 +128,69 @@ def call_json(
     max_tokens: int = 131072,
     temperature: float = 0.25,
     prefer_dict: bool = True,
+    retries: int = 3,
 ) -> dict | list:
-    """K2 call that returns parsed JSON. Extracts JSON from reasoning-heavy responses."""
+    """
+    LLM call that returns parsed JSON. Retries the entire call (new model
+    response) on JSON parse failure — local models sometimes emit malformed
+    JSON and a fresh sample usually parses. Raises ValueError after `retries`
+    consecutive parse failures; raises RuntimeError if the underlying call
+    times out. No silent fallbacks.
+    """
     system_with_json = (
         system.rstrip()
         + "\n\nCRITICAL: Your ENTIRE response must be valid JSON only. "
         "No prose, no markdown, no code fences. Start with { or [ and end with } or ]."
     )
-    raw = call(system_with_json, user, max_tokens=max_tokens, temperature=temperature)
-
-    parsed: dict | list | None = None
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        extracted = _extract_json(raw, prefer_dict=prefer_dict)
+    last_err: Exception | None = None
+    raw = ""
+    for attempt in range(retries):
+        raw = call(system_with_json, user, max_tokens=max_tokens, temperature=temperature)
         try:
-            parsed = json.loads(extracted)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"K2 JSON extraction failed (len={len(raw)}): {exc}\nRaw tail: {raw[-300:]!r}") from exc
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            try:
+                extracted = _extract_json(raw, prefer_dict=prefer_dict)
+                parsed = json.loads(extracted)
+            except json.JSONDecodeError as exc:
+                last_err = exc
+                continue  # retry the LLM call
 
-    # If we expected a dict but got a list, try to find a dict candidate
-    if prefer_dict and isinstance(parsed, list):
-        dict_extracted = _extract_json(raw, prefer_dict=True)
-        try:
-            candidate = json.loads(dict_extracted)
-            if isinstance(candidate, dict):
-                return candidate
-        except (json.JSONDecodeError, ValueError):
-            pass
+        # If we expected a dict but got a list, try to find a dict candidate.
+        # If we can't, raise — callers will .get() on the result and crash
+        # later in a much less useful place than here.
+        if prefer_dict and isinstance(parsed, list):
+            dict_extracted = _extract_json(raw, prefer_dict=True)
+            try:
+                candidate = json.loads(dict_extracted)
+                if isinstance(candidate, dict):
+                    return candidate
+            except (json.JSONDecodeError, ValueError):
+                pass
+            raise ValueError(
+                f"LLM returned a list but caller asked for a dict "
+                f"(no dict candidate in raw output, len={len(raw)})"
+            )
 
-    return parsed
+        return parsed
+
+    raise ValueError(
+        f"LLM JSON parse failed after {retries} attempts (last len={len(raw)}): "
+        f"{last_err}\nRaw tail: {raw[-300:]!r}"
+    )
 
 
 def call_json_list(system: str, user: str, **kwargs) -> list:
-    """Convenience wrapper that always returns a list. Returns [] on any parse failure."""
-    try:
-        result = call_json(system, user, prefer_dict=False, **kwargs)
-    except (ValueError, RuntimeError):
-        return []
+    """
+    Wrapper that always returns a list. Propagates ValueError/RuntimeError
+    on failure — callers should let the build fail loud, not silently use [].
+    """
+    result = call_json(system, user, prefer_dict=False, **kwargs)
     if isinstance(result, dict):
         for key in ("bullets", "paragraphs", "items", "categories"):
             if key in result:
                 return result[key]
         return list(result.values())
-    return result if isinstance(result, list) else []
+    if not isinstance(result, list):
+        raise ValueError(f"Expected list from LLM, got {type(result).__name__}")
+    return result

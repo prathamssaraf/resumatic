@@ -70,6 +70,7 @@ NODE_TABLES = [
         id STRING PRIMARY KEY,
         name STRING,
         description STRING,
+        wequity_title STRING,
         hpe_title STRING,
         ongc_title STRING,
         skills_order STRING[],

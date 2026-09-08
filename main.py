@@ -3,46 +3,15 @@
 Jobs Auto Scanner — CLI entry point.
 
 Usage:
-  uv run python main.py resume --file path/to/jd.txt
   uv run python main.py scan --roles "ML Engineer" "Backend SWE"
   uv run python main.py scan --roles "Software Engineer" --no-remote
   uv run python main.py list
   uv run python main.py list --status new
-  uv run python main.py apply <job-id>
-  uv run python main.py seed
+  uv run python main.py daemon
+  uv run python main.py dashboard
 """
-import sys
 import asyncio
 import argparse
-from pathlib import Path
-
-
-def cmd_resume(args: argparse.Namespace) -> None:
-    from graph.db import init_db
-    from graph.schema import create_schema
-    from resume_builder.pipeline import run_pipeline
-
-    conn = init_db()
-    create_schema(conn)
-
-    if args.file:
-        jd_text = Path(args.file).read_text(encoding="utf-8")
-    elif args.jd:
-        jd_text = " ".join(args.jd)
-    else:
-        print("Error: provide --file or pass the JD as positional argument.")
-        sys.exit(1)
-
-    run_pipeline(
-        jd_text,
-        compile_pdf=not args.no_compile,
-        generate_cover=not args.no_cover,
-    )
-
-
-def cmd_seed(args: argparse.Namespace) -> None:
-    from graph.seed import run
-    run()
 
 
 def cmd_scan(args: argparse.Namespace) -> None:
@@ -50,13 +19,93 @@ def cmd_scan(args: argparse.Namespace) -> None:
     roles = args.roles or ["Software Engineer", "ML Engineer"]
     result = asyncio.run(run_scan(
         roles=roles,
-        remote_only=not args.no_remote,
-        min_score=args.min_score,
         include_aggregators=not args.no_aggregators,
         include_hn=not args.no_hn,
         include_simplify=not args.no_simplify,
+        include_vanshb03=not args.no_vanshb03,
+        include_zapply=not args.no_zapply,
+        include_citi=not args.no_citi,
+        include_workday=not args.no_workday,
+        include_bigtech=not args.no_bigtech,
+        include_meta=not args.no_meta,
     ))
     print_results(result)
+
+
+def cmd_meta(args: argparse.Namespace) -> None:
+    """On-demand browser-driven pull of Meta (metacareers.com) jobs."""
+    from job_scanner.sources.meta import scrape_meta
+    from job_scanner.quality import evaluate_job
+    from job_scanner.store import save_jobs
+    from rich.console import Console
+    console = Console()
+
+    async def run():
+        console.print("[cyan]Launching browser to pull Meta jobs…[/cyan]")
+        jobs = await scrape_meta(max_detail=args.max, headless=not args.show)
+        console.print(f"  Pulled [cyan]{len(jobs)}[/cyan] new US technical Meta jobs. Screening…")
+        loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(3)
+        approved = 0
+
+        async def screen(job):
+            nonlocal approved
+            async with sem:
+                try:
+                    v = await loop.run_in_executor(None, evaluate_job, job)
+                except Exception as e:
+                    console.print(f"  [dim]✗ {job['title'][:40]} — {str(e)[:40]}[/dim]")
+                    return
+            job["score"] = v["score"]; job["score_reason"] = v["reason"]
+            job["status"] = "approved" if v["approved"] else "rejected"
+            await loop.run_in_executor(None, save_jobs, [job])
+            if v["approved"]:
+                approved += 1
+                console.print(f"  [green]✓ APPROVED[/green] {job['title'][:44]} [dim](fit {v['score']})[/dim]")
+            else:
+                console.print(f"  [dim]· rejected {job['title'][:44]} [{v['failed']}][/dim]")
+
+        await asyncio.gather(*[screen(j) for j in jobs])
+        console.print(f"\n[bold]Meta pull complete[/bold] — {approved} approved, {len(jobs)-approved} rejected. See the dashboard.")
+
+    asyncio.run(run())
+
+
+def cmd_xr_scan(args: argparse.Namespace) -> None:
+    """Standalone Google XR/AR/VR tracker scan — separate table, no LLM, no daemon."""
+    from job_scanner.sources.google_xr import scrape_google_xr
+    from job_scanner.xr_store import save_xr_jobs
+    from rich.console import Console
+    console = Console()
+
+    async def run():
+        console.print("[cyan]Scanning Google for XR/AR/VR roles (non-senior, US-only)…[/cyan]")
+        jobs = await scrape_google_xr()
+        ins, dup = save_xr_jobs(jobs)
+        console.print(f"[bold]Done[/bold] — {len(jobs)} found, {ins} new, {dup} already tracked. See the dashboard's Google XR tab.")
+
+    asyncio.run(run())
+
+
+def cmd_linkedin(args: argparse.Namespace) -> None:
+    """On-demand LinkedIn pull: discover, resolve real ATS links, screen, save."""
+    from job_scanner.sources.linkedin import scrape_linkedin
+    from job_scanner.scanner import screen_and_save
+    from rich.console import Console
+    console = Console()
+
+    async def run():
+        console.print("[cyan]Discovering LinkedIn 'Software Engineer' postings (past 1hr)…[/cyan]")
+        jobs = await scrape_linkedin()
+        if not jobs:
+            console.print("[yellow]Nothing new to resolve this run.[/yellow]")
+            return
+        console.print(f"  Resolved [cyan]{len(jobs)}[/cyan] non-Easy-Apply job(s). Screening…")
+        result = await screen_and_save(jobs)
+        console.print(f"\n[bold]LinkedIn pull complete[/bold] — "
+                     f"{result['approved']} approved, {result['rejected']} rejected. See the dashboard.")
+
+    asyncio.run(run())
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -74,78 +123,52 @@ def cmd_dashboard(args: argparse.Namespace) -> None:
     run_dashboard(port=args.port)
 
 
-def cmd_apply(args: argparse.Namespace) -> None:
-    """Pull a saved job's description and run the resume builder on it."""
-    from job_scanner.store import get_job, update_status
-    from graph.db import init_db
-    from graph.schema import create_schema
-    from resume_builder.pipeline import run_pipeline
-
-    job = get_job(args.job_id)
-    if not job:
-        print(f"Job {args.job_id!r} not found. Run `list` to see IDs.")
-        sys.exit(1)
-
-    print(f"Applying to: {job['title']} @ {job['company']}")
-    print(f"URL: {job['url']}\n")
-
-    conn = init_db()
-    create_schema(conn)
-    run_pipeline(
-        job["description"],
-        compile_pdf=not args.no_compile,
-        generate_cover=not args.no_cover,
-    )
-    update_status(args.job_id, "applied")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Jobs Auto Scanner")
     sub = parser.add_subparsers(dest="command", required=True)
-
-    # resume
-    resume_p = sub.add_parser("resume", help="Generate tailored resume from a JD")
-    resume_p.add_argument("jd", nargs="*", help="JD text (or use --file)")
-    resume_p.add_argument("--file", "-f", help="Path to .txt file with the JD")
-    resume_p.add_argument("--no-compile", action="store_true", help="Skip xelatex compilation")
-    resume_p.add_argument("--no-cover", action="store_true", help="Skip cover letter")
-    resume_p.set_defaults(func=cmd_resume)
 
     # scan
     scan_p = sub.add_parser("scan", help="Scan job boards and save new leads")
     scan_p.add_argument("--roles", nargs="+", default=None,
                         help='Role keywords, e.g. --roles "ML Engineer" "Backend SWE"')
-    scan_p.add_argument("--no-remote", action="store_true", help="Include non-remote jobs")
     scan_p.add_argument("--no-aggregators", action="store_true", help="Skip RemoteOK/Remotive/Jobicy")
     scan_p.add_argument("--no-hn", action="store_true", help="Skip Hacker News")
     scan_p.add_argument("--no-simplify", action="store_true", help="Skip SimplifyJobs feed")
-    scan_p.add_argument("--min-score", type=int, default=50, help="Minimum quality score (default 50)")
+    scan_p.add_argument("--no-vanshb03", action="store_true", help="Skip vanshb03 new-grad feed")
+    scan_p.add_argument("--no-zapply", action="store_true", help="Skip zapplyjobs README feed")
+    scan_p.add_argument("--no-citi", action="store_true", help="Skip Citi grad programs")
+    scan_p.add_argument("--no-workday", action="store_true", help="Skip Workday employers")
+    scan_p.add_argument("--no-bigtech", action="store_true", help="Skip Amazon/Netflix/Google/Apple")
+    scan_p.add_argument("--no-meta", action="store_true", help="Skip Meta (browser-driven)")
     scan_p.set_defaults(func=cmd_scan)
+
+    # meta (browser-driven, on-demand)
+    meta_p = sub.add_parser("meta", help="Browser-driven pull of Meta (metacareers.com) jobs")
+    meta_p.add_argument("--max", type=int, default=120, help="Max job detail pages to fetch")
+    meta_p.add_argument("--show", action="store_true", help="Show the browser window (non-headless)")
+    meta_p.set_defaults(func=cmd_meta)
+
+    # xr-scan (standalone, separate table, no LLM/daemon involvement)
+    xr_p = sub.add_parser("xr-scan", help="Scan Google for XR/AR/VR roles (non-senior, US-only)")
+    xr_p.set_defaults(func=cmd_xr_scan)
+
+    # linkedin (authenticated redirect-resolution, on-demand)
+    li_p = sub.add_parser("linkedin", help="Discover LinkedIn SWE postings, resolve real ATS links, screen")
+    li_p.set_defaults(func=cmd_linkedin)
 
     # list
     list_p = sub.add_parser("list", help="List saved jobs")
     list_p.add_argument("--status", choices=["new", "applied", "skip"], default=None)
     list_p.set_defaults(func=cmd_list)
 
-    # apply
-    apply_p = sub.add_parser("apply", help="Run resume builder for a saved job")
-    apply_p.add_argument("job_id", help="Job ID from `list`")
-    apply_p.add_argument("--no-compile", action="store_true")
-    apply_p.add_argument("--no-cover", action="store_true")
-    apply_p.set_defaults(func=cmd_apply)
-
     # daemon
-    daemon_p = sub.add_parser("daemon", help="Run continuous scan + auto-email loop")
+    daemon_p = sub.add_parser("daemon", help="Run continuous scan loop")
     daemon_p.set_defaults(func=cmd_daemon)
 
     # dashboard
     dash_p = sub.add_parser("dashboard", help="Open web dashboard at localhost:8765")
     dash_p.add_argument("--port", type=int, default=8765)
     dash_p.set_defaults(func=cmd_dashboard)
-
-    # seed
-    seed_p = sub.add_parser("seed", help="Re-seed the knowledge graph")
-    seed_p.set_defaults(func=cmd_seed)
 
     args = parser.parse_args()
     args.func(args)
