@@ -12,8 +12,14 @@ DB_PATH = Path(__file__).parent.parent / "data" / "jobs.db"
 
 def _conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB_PATH)
+    c = sqlite3.connect(DB_PATH, timeout=30)
     c.row_factory = sqlite3.Row
+    # WAL lets the dashboard (reader) and the daemon's several concurrent async
+    # loops (writers) hit this file at once without "database is locked" —
+    # readers no longer block behind a writer's transaction. busy_timeout backs
+    # that up: real writer-vs-writer contention retries instead of erroring.
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA busy_timeout=30000")
     c.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             id TEXT PRIMARY KEY,

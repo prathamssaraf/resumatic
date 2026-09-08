@@ -48,6 +48,7 @@ WORKDAY_SITES: list[tuple[str, str, str, str]] = [
     ("AIG",            "aig.wd1.myworkdayjobs.com",             "aig",            "AIG"),
     ("BlackRock",      "blackrock.wd1.myworkdayjobs.com",       "blackrock",      "BlackRock_Professional"),
     ("Zillow",         "zillow.wd5.myworkdayjobs.com",          "zillow",         "Zillow_Group_External"),
+    ("Swift",          "swift.wd3.myworkdayjobs.com",           "swift",          "Join-Swift"),
 ]
 
 _UA = {"User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "

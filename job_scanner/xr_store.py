@@ -15,8 +15,10 @@ DB_PATH = Path(__file__).parent.parent / "data" / "jobs.db"
 
 def _conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB_PATH)
+    c = sqlite3.connect(DB_PATH, timeout=30)
     c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA busy_timeout=30000")
     c.execute("""
         CREATE TABLE IF NOT EXISTS xr_jobs (
             id TEXT PRIMARY KEY,

@@ -15,11 +15,14 @@ from .sources.aggregators import (
 )
 from .sources.hn import scrape_hn_hiring, scrape_hn_search
 from .sources.simplify import scrape_simplify
+from .sources.vanshb03 import scrape_vanshb03
+from .sources.zapply import scrape_zapply
 from .sources.citi import scrape_citi
 from .sources.workday import scrape_workday
 from .sources.amazon import scrape_amazon
 from .sources.netflix import scrape_netflix
 from .sources.google import scrape_google
+from .sources.apple import scrape_apple
 from .sources.meta import scrape_meta
 from .quality import evaluate_job, CRITERIA
 from .store import save_jobs, list_jobs, stats
@@ -220,6 +223,8 @@ DEFAULT_ATS: list[tuple[str, str]] = [
     ("greenhouse", "instabase"),
     ("ashby", "saronic"),
     ("ashby", "flock"),
+    ("ashby", "commure"),
+    ("greenhouse", "atricure"),
 ]
 
 
@@ -260,6 +265,8 @@ async def run_scan(
     include_aggregators: bool = True,
     include_hn: bool = True,
     include_simplify: bool = True,
+    include_vanshb03: bool = True,
+    include_zapply: bool = True,
     include_citi: bool = True,
     include_workday: bool = True,
     include_bigtech: bool = True,
@@ -308,6 +315,18 @@ async def run_scan(
             all_raw.extend(await _guard(scrape_simplify(roles), "simplify"))
             progress.remove_task(task)
 
+        # vanshb03/New-Grad-2026 — same listings.json format, different bot/curation
+        if include_vanshb03:
+            task = progress.add_task("Scanning vanshb03 new-grad feed...", total=None)
+            all_raw.extend(await _guard(scrape_vanshb03(roles), "vanshb03"))
+            progress.remove_task(task)
+
+        # zapplyjobs README table — 500 rows, refreshed every 15 min upstream
+        if include_zapply:
+            task = progress.add_task("Scanning zapplyjobs new-grad SWE feed...", total=None)
+            all_raw.extend(await _guard(scrape_zapply(roles), "zapply", timeout=180))
+            progress.remove_task(task)
+
         # Citi — every US posting from the last 2 months (fetches per-job detail
         # pages; big first-cycle backfill, cheap after via URL dedup).
         if include_citi:
@@ -322,13 +341,14 @@ async def run_scan(
             progress.remove_task(task)
 
         # Big tech with plain-HTTP job APIs (no browser needed) — Amazon, Netflix,
-        # Google. (Meta needs a real browser and runs separately via `main.py meta`.)
+        # Google, Apple. (Meta needs a real browser and runs separately via `main.py meta`.)
         if include_bigtech:
-            task = progress.add_task("Scanning Amazon, Netflix, Google...", total=None)
+            task = progress.add_task("Scanning Amazon, Netflix, Google, Apple...", total=None)
             bigtech_results = await asyncio.gather(
                 _guard(scrape_amazon(roles), "amazon", timeout=300),
                 _guard(scrape_netflix(roles), "netflix", timeout=180),
                 _guard(scrape_google(roles), "google", timeout=180),
+                _guard(scrape_apple(roles), "apple", timeout=300),
                 return_exceptions=True,
             )
             for r in bigtech_results:
@@ -402,6 +422,20 @@ async def run_scan(
     # Approved and scored. Each verdict is SAVED IMMEDIATELY (approved or
     # rejected) so the dashboard fills live and a restart never re-screens work
     # already done. Bounded concurrency keeps the local model responsive.
+    screened = await screen_and_save(candidates, max_concurrent=max_concurrent)
+
+    return {
+        "raw": len(all_raw),
+        "after_dedup": len(deduped),
+        "candidates": len(candidates),
+        **screened,
+    }
+
+
+async def screen_and_save(candidates: list[dict], max_concurrent: int = 3) -> dict:
+    """Run the LLM screen over `candidates` and save each verdict immediately.
+    Shared by run_scan() and any other source (e.g. LinkedIn) that needs to feed
+    the same Approved/Rejected pipeline on its own schedule."""
     loop = asyncio.get_running_loop()
     sem = asyncio.Semaphore(max_concurrent)
     save_lock = asyncio.Lock()
@@ -449,21 +483,15 @@ async def run_scan(
 
     await asyncio.gather(*[_screen(j) for j in candidates])
 
-    approved_n, rejected_n = counts["approved"], counts["rejected"]
-    inserted, dupes, errored = counts["inserted"], counts["dupes"], counts["errored"]
-
-    if errored:
-        console.print(f"  [dim]{errored} job(s) errored during screening — will retry next cycle[/dim]")
+    if counts["errored"]:
+        console.print(f"  [dim]{counts['errored']} job(s) errored during screening — will retry next cycle[/dim]")
 
     return {
-        "raw": len(all_raw),
-        "after_dedup": len(deduped),
-        "candidates": len(candidates),
-        "approved": approved_n,
-        "rejected": rejected_n,
-        "errored": errored,
-        "inserted": inserted,
-        "dupes": dupes,
+        "approved": counts["approved"],
+        "rejected": counts["rejected"],
+        "errored": counts["errored"],
+        "inserted": counts["inserted"],
+        "dupes": counts["dupes"],
         "jobs": approved_jobs,
     }
 

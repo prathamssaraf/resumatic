@@ -518,8 +518,9 @@ function _applySort(gridId, key, dir) {
   var rows = Array.prototype.slice.call(grid.querySelectorAll('.dgr'));
   rows.sort(function(a, b) {
     var va, vb;
-    if (key === 'score') { va = parseFloat(a.dataset.score) || 0; vb = parseFloat(b.dataset.score) || 0; }
-    else                 { va = a.dataset.date || ''; vb = b.dataset.date || ''; }
+    if (key === 'score')      { va = parseFloat(a.dataset.score) || 0; vb = parseFloat(b.dataset.score) || 0; }
+    else if (key === 'added') { va = a.dataset.added || ''; vb = b.dataset.added || ''; }
+    else                      { va = a.dataset.date || ''; vb = b.dataset.date || ''; }
     if (va < vb) return dir === 'asc' ? -1 : 1;
     if (va > vb) return dir === 'asc' ?  1 : -1;
     return 0;
@@ -534,12 +535,18 @@ function _applySort(gridId, key, dir) {
     r.style.animation = 'none';
     r.style.opacity = '1';
   });
-  document.querySelectorAll('.sort-btn').forEach(function(btn) {
-    var active = btn.dataset.key === key;
-    btn.classList.toggle('active', active);
-    var base = btn.dataset.key === 'date' ? 'Date' : 'Rating';
-    btn.innerHTML = base + (active ? '<span class="arr">' + (dir === 'asc' ? '↑' : '↓') + '</span>' : '');
-  });
+  // Each grid's own sort bar (identified by data-grid) updates independently —
+  // separate grids can reuse the same .sort-btn class without stomping on
+  // each other's active/label state.
+  var labels = {date: 'Date', score: 'Rating', added: 'Added'};
+  var bar = document.querySelector('.sortbar[data-grid="' + gridId + '"]');
+  if (bar) {
+    bar.querySelectorAll('.sort-btn').forEach(function(btn) {
+      var active = btn.dataset.key === key;
+      btn.classList.toggle('active', active);
+      btn.innerHTML = labels[btn.dataset.key] + (active ? '<span class="arr">' + (dir === 'asc' ? '↑' : '↓') + '</span>' : '');
+    });
+  }
 }
 function sortGrid(gridId, key) {
   var storeKey = 'sort:' + gridId;
@@ -582,6 +589,7 @@ function _restoreGridState(gridId, searchInputId, defaultKey, defaultDir) {
   _applySort(gridId, saved.key, saved.dir);
 }
 _restoreGridState('approved-grid', 'approved-search', 'date', 'desc');
+_restoreGridState('rejected-grid', 'rejected-search', 'date', 'desc');
 _restoreGridState('xr-grid', 'xr-search', 'date', 'desc');
 """
 
@@ -627,8 +635,9 @@ def _jobs_grid(jobs: list[dict], mark_applied: bool = True, grid_id: str = "") -
         else:
             mark_btn = ""
         actions = f'<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">{apply}{mark_btn}</div>'
+        added_raw=_esc(j.get("created_at","") or "")
         rows.append(
-            f'<div class="dgr" data-score="{sc}" data-date="{_esc(date_raw)}">'
+            f'<div class="dgr" data-score="{sc}" data-date="{_esc(date_raw)}" data-added="{added_raw}">'
             f'<div class="gc">{_score_arc(sc)}</div>'
             f'<div class="gc"><div class="jt" title="{ti}">{ti}</div><div class="jco">{co}</div></div>'
             f'<div class="gc"><span class="jpl">{pl}</span></div>'
@@ -675,7 +684,7 @@ def _render_page() -> str:
 
     # Sort toolbar for the approved grid (client-side, persisted in localStorage)
     sort_bar = (
-        '<div class="sortbar">'
+        '<div class="sortbar" data-grid="approved-grid">'
         '<input class="search-box" id="approved-search" type="search" '
         'placeholder="Search title, company, location, reason…" '
         'oninput="filterGrid(\'approved-grid\', this.value)">'
@@ -683,6 +692,7 @@ def _render_page() -> str:
         '<span class="sortbar-l">Sort by</span>'
         '<button class="sort-btn" data-key="date" onclick="sortGrid(\'approved-grid\',\'date\')">Date</button>'
         '<button class="sort-btn" data-key="score" onclick="sortGrid(\'approved-grid\',\'score\')">Rating</button>'
+        '<button class="sort-btn" data-key="added" onclick="sortGrid(\'approved-grid\',\'added\')">Added</button>'
         '</div>'
     )
 
@@ -695,9 +705,21 @@ def _render_page() -> str:
     )
 
     # ── Rejected view: jobs that failed at least one criterion ────────────────
+    rejected_sort_bar = (
+        '<div class="sortbar" data-grid="rejected-grid">'
+        '<input class="search-box" id="rejected-search" type="search" '
+        'placeholder="Search title, company, location, reason…" '
+        'oninput="filterGrid(\'rejected-grid\', this.value)">'
+        '<span class="search-count" id="rejected-search-count"></span>'
+        '<span class="sortbar-l">Sort by</span>'
+        '<button class="sort-btn" data-key="date" onclick="sortGrid(\'rejected-grid\',\'date\')">Date</button>'
+        '<button class="sort-btn" data-key="score" onclick="sortGrid(\'rejected-grid\',\'score\')">Rating</button>'
+        '<button class="sort-btn" data-key="added" onclick="sortGrid(\'rejected-grid\',\'added\')">Added</button>'
+        '</div>'
+    )
     rejected_tab=(
-        sec("Rejected &mdash; Failed a Criterion", rejected, "sec-sk")
-        or '<div class="empty">No rejected jobs yet.</div>'
+        (rejected_sort_bar + sec("Rejected &mdash; Failed a Criterion", rejected, "sec-sk", "rejected-grid"))
+        if rejected else '<div class="empty">No rejected jobs yet.</div>'
     )
 
     # ── Google XR tracker — fully separate feature: own table (xr_jobs), own

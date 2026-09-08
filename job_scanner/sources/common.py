@@ -3,6 +3,7 @@ Shared HTTP client and date utilities for all sources.
 """
 from __future__ import annotations
 import asyncio
+import html
 import re
 from datetime import datetime, timezone, timedelta
 import httpx
@@ -100,6 +101,110 @@ def is_recent(date_str: str) -> bool:
         return (datetime.now(tz=timezone.utc) - dt).days <= MAX_AGE_DAYS
     except Exception:
         return False
+
+
+# ── ATS detail lookup ──────────────────────────────────────────────────────
+# Shared by any source that only has a bare apply URL (no reliable structured
+# data of its own) — e.g. a README table that truncates titles. Detects the
+# ATS from the URL shape and hits that ATS's own public API for the real
+# title/description/location/posted_date. Best-effort: returns {} (never
+# raises) so a source it can't identify just falls back to what it already has.
+_GREENHOUSE_ID = re.compile(r"greenhouse\.io/[^/]+/jobs/(\d+)")
+_LEVER = re.compile(r"lever\.co/([^/]+)/([a-f0-9-]+)")
+_ASHBY = re.compile(r"ashbyhq\.com/([^/]+)/([a-f0-9-]+)")
+_WORKDAY_URL = re.compile(r"^https?://([^/]+\.myworkdayjobs\.com)/([^/]+)(/job/.+)$")
+_ATS_UA = {"User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"),
+           "Accept": "application/json"}
+_US_COUNTRIES = {"united states", "united states of america", "usa", "us"}
+
+
+async def fetch_ats_detail(url: str) -> dict:
+    """Best-effort {title, description, location, posted_date, country} for an
+    arbitrary Greenhouse/Lever/Ashby/Workday job URL. {} if unrecognized/failed."""
+    try:
+        m = _WORKDAY_URL.match(url)
+        if m:
+            host, site, path = m.group(1), m.group(2), m.group(3)
+            tenant = host.split(".")[0]
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True, verify=False) as c:
+                r = await c.get(f"https://{host}/wday/cxs/{tenant}/{site}{path}", headers=_ATS_UA)
+                r.raise_for_status()
+                info = r.json().get("jobPostingInfo", {}) or {}
+            if not info:
+                return {}
+            country = ""
+            cc = info.get("country")
+            if isinstance(cc, dict):
+                country = str(cc.get("descriptor", "")).strip().lower()
+            desc = re.sub(r"<[^>]+>", " ", info.get("jobDescription", "") or "")
+            desc = html.unescape(re.sub(r"\s+", " ", desc)).strip()
+            return {
+                "title": info.get("title", ""),
+                "description": desc[:100000],
+                "location": info.get("location", "") or country or "",
+                "posted_date": parse_date(info.get("startDate", "")),
+                "country": country,
+            }
+
+        gh = _GREENHOUSE_ID.search(url)
+        if gh:
+            data = await json_get(f"https://boards-api.greenhouse.io/v1/boards/jobs/{gh.group(1)}")
+            if isinstance(data, dict) and data.get("content"):
+                return {
+                    "title": data.get("title", ""),
+                    "description": strip_html(data["content"])[:100000],
+                    "location": (data.get("location") or {}).get("name", ""),
+                    "posted_date": parse_date(data.get("updated_at") or data.get("first_published", "")),
+                }
+            return {}
+
+        lv = _LEVER.search(url)
+        if lv:
+            slug, job_id = lv.group(1), lv.group(2)
+            data = await json_get(f"https://api.lever.co/v0/postings/{slug}/{job_id}")
+            if isinstance(data, dict):
+                return {
+                    "title": data.get("text", ""),
+                    "description": ((data.get("descriptionPlain") or "") + "\n" +
+                                    (data.get("additionalPlain") or "")).strip()[:100000],
+                    "location": (data.get("categories") or {}).get("location", ""),
+                    "posted_date": parse_date(data.get("createdAt")),
+                }
+            return {}
+
+        ab = _ASHBY.search(url)
+        if ab:
+            data = await json_get(f"https://api.ashbyhq.com/posting-api/job-posting/{ab.group(2)}")
+            if isinstance(data, dict):
+                return {
+                    "title": data.get("title", ""),
+                    "description": strip_html(data.get("descriptionHtml") or
+                                              data.get("descriptionPlain") or "")[:100000],
+                    "location": data.get("location", ""),
+                    "posted_date": parse_date(data.get("publishedAt")),
+                }
+            return {}
+    except Exception:
+        pass
+    return {}
+
+
+async def fetch_ats_description(url: str) -> str:
+    """Description-only variant for sources that already have their own title/
+    location/date and just need the JD text (falls back to a plain-text scrape
+    for URLs no known ATS API matches)."""
+    detail = await fetch_ats_detail(url)
+    if detail.get("description"):
+        return detail["description"]
+    try:
+        text = await text_get(url, headers={"User-Agent": "Mozilla/5.0"})
+        if text:
+            plain = strip_html(text)
+            return plain[500:3500] if len(plain) > 500 else plain
+    except Exception:
+        pass
+    return ""
 
 
 def strip_html(text: str) -> str:

@@ -16,15 +16,22 @@ from rich.console import Console
 from rich.rule import Rule
 
 import config
-from job_scanner.scanner import run_scan
+from job_scanner.scanner import run_scan, screen_and_save
 from job_scanner.store import stats, expire_old_jobs
 from job_scanner.sources.google_xr import scrape_google_xr
 from job_scanner.xr_store import save_xr_jobs, xr_stats
+from job_scanner.sources.linkedin import scrape_linkedin
 
 
 console = Console()
 
-XR_SCAN_INTERVAL_SECONDS = 30 * 60  # Google XR tracker: independent 30-min cadence
+XR_SCAN_INTERVAL_SECONDS = 30 * 60        # Google XR tracker: independent 30-min cadence
+LINKEDIN_SCAN_INTERVAL_SECONDS = 30 * 60  # LinkedIn: independent 30-min cadence (see
+                                           # job_scanner/sources/linkedin.py for why —
+                                           # the authenticated redirect-resolution step
+                                           # is rate-limited more aggressively than
+                                           # everything else, so it stays off the main
+                                           # 20-min loop)
 
 
 # ── Scan loop ─────────────────────────────────────────────────────────────────
@@ -79,6 +86,31 @@ async def _xr_loop(scan_interval: int) -> None:
         await asyncio.sleep(scan_interval)
 
 
+# ── LinkedIn loop (independent — feeds the SAME main `jobs` table and LLM ─────
+# screen as the normal scan loop, just on its own slower/more-conservative
+# cadence since it's the only source touching an authenticated LinkedIn
+# session; see job_scanner/sources/linkedin.py for the full design).
+
+async def _linkedin_loop(scan_interval: int) -> None:
+    cycle = 1
+    while True:
+        try:
+            jobs = await scrape_linkedin()
+            if jobs:
+                result = await screen_and_save(jobs, max_concurrent=config.MAX_SCREEN_CONCURRENCY)
+                console.print(
+                    f"  [dim]LinkedIn[/dim] cycle {cycle}: {len(jobs)} resolved → "
+                    f"[green]{result['approved']} approved[/green], "
+                    f"[dim]{result['rejected']} rejected[/dim]"
+                )
+            else:
+                console.print(f"  [dim]LinkedIn[/dim] cycle {cycle}: nothing new")
+        except Exception as e:
+            console.print(f"  [dim]LinkedIn error:[/dim] {e}")
+        cycle += 1
+        await asyncio.sleep(scan_interval)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 async def run_daemon() -> None:
@@ -105,9 +137,19 @@ async def run_daemon() -> None:
                   f"(independent, non-senior + US + XR/AR/VR only, no LLM) — "
                   f"{xr_s['total']} tracked so far\n")
 
-    # Two fully independent loops: the main LLM-screened scan, and the
-    # deterministic Google XR tracker. They share nothing except the process.
+    from pathlib import Path as _Path
+    li_state = _Path("data/linkedin_auth/state.json")
+    console.print(f"  LinkedIn source   : every {LINKEDIN_SCAN_INTERVAL_SECONDS // 60} min "
+                  f"(Software Engineer, past 1hr, Easy Apply skipped, "
+                  f"feeds the normal LLM screen) — "
+                  f"{'session ready' if li_state.exists() else '[yellow]no saved session, will no-op[/yellow]'}\n")
+
+    # Three fully independent loops: the main LLM-screened scan, the
+    # deterministic Google XR tracker, and the LinkedIn redirect-resolution
+    # loop (LLM-screened, but on its own slower cadence). They share nothing
+    # except the process (and, for scan/LinkedIn, the same `jobs` table).
     await asyncio.gather(
         _scan_loop(config.SCAN_INTERVAL_SECONDS),
         _xr_loop(XR_SCAN_INTERVAL_SECONDS),
+        _linkedin_loop(LINKEDIN_SCAN_INTERVAL_SECONDS),
     )

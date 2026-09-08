@@ -22,6 +22,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
         include_aggregators=not args.no_aggregators,
         include_hn=not args.no_hn,
         include_simplify=not args.no_simplify,
+        include_vanshb03=not args.no_vanshb03,
+        include_zapply=not args.no_zapply,
         include_citi=not args.no_citi,
         include_workday=not args.no_workday,
         include_bigtech=not args.no_bigtech,
@@ -85,6 +87,27 @@ def cmd_xr_scan(args: argparse.Namespace) -> None:
     asyncio.run(run())
 
 
+def cmd_linkedin(args: argparse.Namespace) -> None:
+    """On-demand LinkedIn pull: discover, resolve real ATS links, screen, save."""
+    from job_scanner.sources.linkedin import scrape_linkedin
+    from job_scanner.scanner import screen_and_save
+    from rich.console import Console
+    console = Console()
+
+    async def run():
+        console.print("[cyan]Discovering LinkedIn 'Software Engineer' postings (past 1hr)…[/cyan]")
+        jobs = await scrape_linkedin()
+        if not jobs:
+            console.print("[yellow]Nothing new to resolve this run.[/yellow]")
+            return
+        console.print(f"  Resolved [cyan]{len(jobs)}[/cyan] non-Easy-Apply job(s). Screening…")
+        result = await screen_and_save(jobs)
+        console.print(f"\n[bold]LinkedIn pull complete[/bold] — "
+                     f"{result['approved']} approved, {result['rejected']} rejected. See the dashboard.")
+
+    asyncio.run(run())
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     from job_scanner.scanner import print_job_list
     print_job_list(status=args.status)
@@ -111,9 +134,11 @@ def main() -> None:
     scan_p.add_argument("--no-aggregators", action="store_true", help="Skip RemoteOK/Remotive/Jobicy")
     scan_p.add_argument("--no-hn", action="store_true", help="Skip Hacker News")
     scan_p.add_argument("--no-simplify", action="store_true", help="Skip SimplifyJobs feed")
+    scan_p.add_argument("--no-vanshb03", action="store_true", help="Skip vanshb03 new-grad feed")
+    scan_p.add_argument("--no-zapply", action="store_true", help="Skip zapplyjobs README feed")
     scan_p.add_argument("--no-citi", action="store_true", help="Skip Citi grad programs")
     scan_p.add_argument("--no-workday", action="store_true", help="Skip Workday employers")
-    scan_p.add_argument("--no-bigtech", action="store_true", help="Skip Amazon/Netflix/Google")
+    scan_p.add_argument("--no-bigtech", action="store_true", help="Skip Amazon/Netflix/Google/Apple")
     scan_p.add_argument("--no-meta", action="store_true", help="Skip Meta (browser-driven)")
     scan_p.set_defaults(func=cmd_scan)
 
@@ -126,6 +151,10 @@ def main() -> None:
     # xr-scan (standalone, separate table, no LLM/daemon involvement)
     xr_p = sub.add_parser("xr-scan", help="Scan Google for XR/AR/VR roles (non-senior, US-only)")
     xr_p.set_defaults(func=cmd_xr_scan)
+
+    # linkedin (authenticated redirect-resolution, on-demand)
+    li_p = sub.add_parser("linkedin", help="Discover LinkedIn SWE postings, resolve real ATS links, screen")
+    li_p.set_defaults(func=cmd_linkedin)
 
     # list
     list_p = sub.add_parser("list", help="List saved jobs")

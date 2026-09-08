@@ -1,5 +1,11 @@
 """
-SimplifyJobs New-Grad-Positions feed.
+vanshb03/New-Grad-2026 feed — same Pitt-CSC-style listings.json format as
+SimplifyJobs, sourced by a different bot ("cvrve-bot"), so it catches postings
+Simplify's own bot misses. No 'category' field on any entry (unlike Simplify),
+so no category pre-filter here — role-type screening is left entirely to the
+normal LLM criteria (role_type, level, etc. in job_scanner/quality.py), same
+as every other source with no structured category of its own.
+
 - First run: last 7 days only
 - Subsequent runs: only jobs newer than last scan
 - Fetches full description from the job URL (ATS-aware)
@@ -10,16 +16,11 @@ from pathlib import Path
 from .common import json_get, parse_date, fetch_ats_description
 
 LISTINGS_URL = (
-    "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions"
+    "https://raw.githubusercontent.com/vanshb03/New-Grad-2026"
     "/dev/.github/scripts/listings.json"
 )
 
-_STATE_FILE = Path(__file__).parent.parent.parent / "data" / "simplify_last_scan.txt"
-
-_GOOD_CATEGORIES = {
-    "Software", "Software Engineering", "AI/ML/Data",
-    "Data Science, AI & Machine Learning",
-}
+_STATE_FILE = Path(__file__).parent.parent.parent / "data" / "vanshb03_last_scan.txt"
 
 _NO_SPONSORSHIP = {
     "Does Not Offer Sponsorship",
@@ -28,7 +29,6 @@ _NO_SPONSORSHIP = {
 
 
 def _last_scan_ts() -> int:
-    """Unix timestamp of last simplify scan. Default: 7 days ago."""
     if _STATE_FILE.exists():
         try:
             return int(_STATE_FILE.read_text().strip())
@@ -42,7 +42,7 @@ def _save_scan_ts() -> None:
     _STATE_FILE.write_text(str(int(time.time())))
 
 
-async def scrape_simplify(roles: list[str]) -> list[dict]:
+async def scrape_vanshb03(roles: list[str]) -> list[dict]:
     data = await json_get(LISTINGS_URL)
     if not isinstance(data, list):
         return []
@@ -54,8 +54,6 @@ async def scrape_simplify(roles: list[str]) -> list[dict]:
             continue
         if j.get("sponsorship") in _NO_SPONSORSHIP:
             continue
-        if j.get("category") and j["category"] not in _GOOD_CATEGORIES:
-            continue
         if (j.get("date_posted") or 0) < cutoff:
             continue
         candidates.append(j)
@@ -63,9 +61,8 @@ async def scrape_simplify(roles: list[str]) -> list[dict]:
     import asyncio
     from rich.console import Console
     console = Console()
-    console.print(f"  [dim]Simplify: {len(candidates)} new entries since last scan[/dim]")
+    console.print(f"  [dim]vanshb03: {len(candidates)} new entries since last scan[/dim]")
 
-    # Fetch descriptions concurrently (cap at 20 parallel to be polite)
     sem = asyncio.Semaphore(20)
 
     async def fetch_one(j: dict) -> dict:
@@ -81,7 +78,7 @@ async def scrape_simplify(roles: list[str]) -> list[dict]:
                 "title": j.get("title", ""),
                 "company": j.get("company_name", ""),
                 "url": j.get("url", ""),
-                "platform": "simplify",
+                "platform": "vanshb03",
                 "description": desc,
                 "location": loc,
                 "salary": "",
